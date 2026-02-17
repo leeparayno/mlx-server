@@ -129,6 +129,7 @@ let package = Package(
             name: "Scheduler",
             dependencies: [
                 "Core",
+                "Memory",
                 .product(name: "AsyncAlgorithms", package: "swift-async-algorithms"),
                 .product(name: "Logging", package: "swift-log")
             ],
@@ -152,6 +153,7 @@ let package = Package(
             dependencies: [
                 "Core",
                 "Scheduler",
+                "Memory",
                 .product(name: "Vapor", package: "vapor"),
                 .product(name: "Logging", package: "swift-log")
             ],
@@ -178,7 +180,7 @@ let package = Package(
 
         .testTarget(
             name: "SchedulerTests",
-            dependencies: ["Scheduler", "Core"],
+            dependencies: ["Scheduler", "Core", "Memory"],
             path: "Tests/SchedulerTests"
         ),
 

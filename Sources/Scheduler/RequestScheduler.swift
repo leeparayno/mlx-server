@@ -113,6 +113,21 @@ public actor RequestScheduler {
         return (statefulRequest.id, stream)
     }
 
+    /// Enqueue a stateful request back into the pending queue
+    /// Used for requeueing requests that couldn't be processed (e.g., KV cache allocation failure)
+    /// - Parameter request: The stateful request to enqueue
+    public func enqueue(_ request: StatefulRequest) {
+        // Remove from active requests if present
+        activeRequests.removeValue(forKey: request.id)
+
+        // Add back to pending queue
+        pendingQueue.enqueue(request)
+
+        logger.debug("Request requeued", metadata: [
+            "request_id": "\(request.id)"
+        ])
+    }
+
     // MARK: - Batch Management
 
     /// Dequeue next batch of requests for processing

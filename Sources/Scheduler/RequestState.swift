@@ -170,12 +170,21 @@ public struct BatchSlot: Sendable {
         generatedTokens.count
     }
 
-    // Initializer
+    // Initializers
     public init(slotId: Int, request: StatefulRequest) {
         self.slotId = slotId
         self.request = request
         self.generatedTokens = []
         self.kvCacheBlockIds = []
+        self.isFinished = false
+        self.finishReason = nil
+    }
+
+    public init(slotId: Int, request: StatefulRequest, kvCacheBlockIds: [Int]) {
+        self.slotId = slotId
+        self.request = request
+        self.generatedTokens = []
+        self.kvCacheBlockIds = kvCacheBlockIds
         self.isFinished = false
         self.finishReason = nil
     }

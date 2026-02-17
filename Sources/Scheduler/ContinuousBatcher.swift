@@ -1,6 +1,7 @@
 import Foundation
 import Core
 import MLXLMCommon
+import Memory
 import Logging
 
 /// Implements continuous batching for maximum GPU utilization
@@ -16,6 +17,7 @@ public actor ContinuousBatcher {
     private let scheduler: RequestScheduler
     private let engine: InferenceEngine
     private let gpuMonitor: GPUMonitor
+    private let kvCache: PagedKVCache
 
     // State
     private var isRunning: Bool = false
@@ -48,6 +50,7 @@ public actor ContinuousBatcher {
         self.gpuMonitor = GPUMonitor(config: GPUMonitor.Config(
             maxBatchSize: config.maxBatchSize
         ))
+        self.kvCache = PagedKVCache(blockSize: 16, numBlocks: 1024)
     }
 
     // MARK: - Main Loop
@@ -110,7 +113,7 @@ public actor ContinuousBatcher {
         await updateSlots(nextTokens: nextTokens, activeIndices: batchInput.activeIndices)
 
         // 5. Cleanup finished slots
-        cleanupFinishedSlots()
+        await cleanupFinishedSlots()
 
         // 6. Check for cancellations
         await checkCancellations()
@@ -181,17 +184,42 @@ public actor ContinuousBatcher {
 
             if slots[i] == nil {
                 let request = newRequests[requestIndex]
-                slots[i] = BatchSlot(slotId: i, request: request)
 
-                // Mark as streaming
-                await scheduler.markStreaming(requestId: request.id)
+                // Allocate KV cache blocks for this request
+                do {
+                    let kvBlockIds = try await kvCache.allocate(
+                        for: request.id,
+                        numTokens: request.request.maxTokens
+                    )
 
-                logger.debug("Request assigned to slot", metadata: [
-                    "slot_id": "\(i)",
-                    "request_id": "\(request.id)"
-                ])
+                    slots[i] = BatchSlot(
+                        slotId: i,
+                        request: request,
+                        kvCacheBlockIds: kvBlockIds
+                    )
 
-                requestIndex += 1
+                    // Mark as streaming
+                    await scheduler.markStreaming(requestId: request.id)
+
+                    logger.debug("Request assigned to slot", metadata: [
+                        "slot_id": "\(i)",
+                        "request_id": "\(request.id)",
+                        "kv_blocks": "\(kvBlockIds.count)"
+                    ])
+
+                    requestIndex += 1
+                } catch {
+                    // Failed to allocate KV cache blocks (memory pressure)
+                    logger.warning("Failed to allocate KV cache blocks, requeueing request", metadata: [
+                        "request_id": "\(request.id)",
+                        "error": "\(error.localizedDescription)"
+                    ])
+
+                    // Enqueue the request back to try again later
+                    await scheduler.enqueue(request)
+
+                    requestIndex += 1
+                }
             }
         }
     }
@@ -201,6 +229,7 @@ public actor ContinuousBatcher {
         var tokenIds: [Int] = []
         var positions: [Int] = []
         var prompts: [String] = []
+        var kvCacheBlockIds: [[Int]] = []
         var activeIndices: [Int] = []
 
         for (i, slot) in slots.enumerated() {
@@ -212,6 +241,7 @@ public actor ContinuousBatcher {
             tokenIds.append(tokenId)
             positions.append(slot.nextPosition)
             prompts.append(slot.request.request.prompt)
+            kvCacheBlockIds.append(slot.kvCacheBlockIds)
             activeIndices.append(i)
         }
 
@@ -221,6 +251,7 @@ public actor ContinuousBatcher {
             tokenIds: tokenIds,
             positions: positions,
             prompts: prompts,
+            kvCacheBlockIds: kvCacheBlockIds,
             activeIndices: activeIndices
         )
     }
@@ -288,11 +319,17 @@ public actor ContinuousBatcher {
     }
 
     /// Remove finished slots
-    private func cleanupFinishedSlots() {
+    private func cleanupFinishedSlots() async {
         for i in 0..<slots.count {
             if let slot = slots[i], slot.isFinished {
+                // Release KV cache blocks
+                await kvCache.release(for: slot.request.id)
+
                 slots[i] = nil
-                logger.trace("Slot freed", metadata: ["slot_id": "\(i)"])
+                logger.trace("Slot freed", metadata: [
+                    "slot_id": "\(i)",
+                    "request_id": "\(slot.request.id)"
+                ])
             }
         }
     }
@@ -305,6 +342,9 @@ public actor ContinuousBatcher {
             // Check if request was cancelled
             if let status = await scheduler.getStatus(requestId: slot.request.id),
                status == .cancelled {
+                // Release KV cache blocks
+                await kvCache.release(for: slot.request.id)
+
                 // Free the slot immediately
                 slots[i] = nil
 
@@ -312,8 +352,6 @@ public actor ContinuousBatcher {
                     "slot_id": "\(i)",
                     "request_id": "\(slot.request.id)"
                 ])
-
-                // Note: KV cache blocks will be released in Phase 4
             }
         }
     }
@@ -376,5 +414,6 @@ private struct BatchInput {
     let tokenIds: [Int]
     let positions: [Int]
     let prompts: [String]
+    let kvCacheBlockIds: [[Int]]  // KV cache block IDs for each slot
     let activeIndices: [Int]
 }
