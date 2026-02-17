@@ -186,7 +186,13 @@ let package = Package(
 
         .testTarget(
             name: "APITests",
-            dependencies: ["API", "Core"],
+            dependencies: [
+                "API",
+                "Core",
+                "Scheduler",
+                "Memory",
+                .product(name: "XCTVapor", package: "vapor")
+            ],
             path: "Tests/APITests"
         )
     ]

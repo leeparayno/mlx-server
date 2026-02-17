@@ -102,11 +102,14 @@ public actor ContinuousBatcher {
             return  // No active slots
         }
 
-        // 3. Batched forward pass
+        // 3. Batched forward pass (Phase 4.2: with KV cache and sampling params)
         let nextTokens = try await engine.forwardBatch(
             tokenIds: batchInput.tokenIds,
             positions: batchInput.positions,
-            prompts: batchInput.prompts
+            prompts: batchInput.prompts,
+            kvCacheBlockIds: batchInput.kvCacheBlockIds,
+            temperatures: Array(repeating: 0.7, count: batchInput.tokenIds.count),  // TODO: from request config
+            topP: Array(repeating: 0.95, count: batchInput.tokenIds.count)  // TODO: from request config
         )
 
         // 4. Update slots with new tokens
@@ -123,16 +126,25 @@ public actor ContinuousBatcher {
             await adjustBatchSize()
         }
 
-        // 8. Record utilization
-        let utilization = Double(activeSlotCount) / Double(currentMaxBatchSize)
-        await gpuMonitor.recordUtilization(utilization)
+        // 8. Record utilization (Phase 4.3: combine slot and memory utilization)
+        let slotUtilization = Double(activeSlotCount) / Double(currentMaxBatchSize)
+
+        // Get memory utilization from KV cache stats
+        let kvStats = await kvCache.stats
+        let memoryUtilization = kvStats.utilizationPercent / 100.0
+
+        // Use max of slot and memory utilization for adaptive sizing
+        let combinedUtilization = max(slotUtilization, memoryUtilization)
+        await gpuMonitor.recordUtilization(combinedUtilization)
 
         let queueLen = await scheduler.queueLength
         logger.trace("Batching step completed", metadata: [
             "step": "\(stepCount)",
             "active_slots": "\(activeSlotCount)",
             "pending_queue": "\(queueLen)",
-            "utilization": "\(String(format: "%.2f", utilization))"
+            "slot_utilization": "\(String(format: "%.2f", slotUtilization))",
+            "memory_utilization": "\(String(format: "%.2f", memoryUtilization))",
+            "combined_utilization": "\(String(format: "%.2f", combinedUtilization))"
         ])
     }
 
@@ -140,8 +152,9 @@ public actor ContinuousBatcher {
 
     /// Fill empty slots with pending requests
     private func fillEmptySlots() async {
-        // Check memory pressure (Phase 3.3)
-        let memoryPressure = await gpuMonitor.checkMemoryPressure()
+        // Check memory pressure (Phase 4.3: with real KV cache stats)
+        let kvStats = await kvCache.stats
+        let memoryPressure = await gpuMonitor.checkMemoryPressure(kvCacheStats: kvStats)
 
         // Calculate effective max batch size based on memory pressure
         var effectiveMaxBatchSize = currentMaxBatchSize
@@ -160,7 +173,22 @@ public actor ContinuousBatcher {
                 "effective_max": "\(effectiveMaxBatchSize)"
             ])
         case .normal:
-            break
+            // Phase 4.3: Limit by available KV cache blocks
+            // Calculate max slots based on available blocks
+            // Assume 512 tokens per request on average (reasonable for most LLM workloads)
+            let avgTokensPerRequest = 512
+            let blocksPerRequest = (avgTokensPerRequest + 15) / 16  // 16 tokens per block (PagedKVCache default)
+            let maxSlotsByBlocks = kvStats.freeBlocks / blocksPerRequest
+            effectiveMaxBatchSize = min(effectiveMaxBatchSize, maxSlotsByBlocks)
+
+            if maxSlotsByBlocks < currentMaxBatchSize {
+                logger.info("Limiting batch size by available KV cache blocks", metadata: [
+                    "free_blocks": "\(kvStats.freeBlocks)",
+                    "blocks_per_request": "\(blocksPerRequest)",
+                    "max_slots_by_blocks": "\(maxSlotsByBlocks)",
+                    "effective_max": "\(effectiveMaxBatchSize)"
+                ])
+            }
         }
 
         var emptySlotCount = 0
@@ -404,6 +432,11 @@ public actor ContinuousBatcher {
     /// Get GPU monitor statistics
     public func getGPUStats() async -> (averageUtilization: Double, currentUtilization: Double, sampleCount: Int) {
         return await gpuMonitor.stats()
+    }
+
+    /// Check if batcher is running
+    public var running: Bool {
+        return isRunning
     }
 }
 

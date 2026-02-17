@@ -1,5 +1,7 @@
 import Foundation
 import Logging
+import MLX
+import Memory
 
 // MARK: - Memory Pressure
 
@@ -113,25 +115,33 @@ public actor GPUMonitor {
 
     // MARK: - Memory Pressure
 
-    /// Check current memory pressure
+    /// Check current memory pressure with KV cache stats
+    /// Phase 4.3: Integrates real MLX memory and KV cache block utilization
+    /// - Parameter kvCacheStats: KV cache memory statistics
     /// - Returns: Memory pressure level
-    public func checkMemoryPressure() -> MemoryPressure {
-        // TODO: Integrate with actual MLX memory tracking
-        // For now, use placeholder logic based on available memory
-        let allocatedGB = estimateAllocatedMemoryGB()
-        let usageRatio = Double(allocatedGB) / Double(config.totalMemoryGB)
+    public func checkMemoryPressure(kvCacheStats: MemoryStats) -> MemoryPressure {
+        let allocatedGB = estimateAllocatedMemoryGB(kvCacheStats: kvCacheStats)
+        let memoryUsageRatio = Double(allocatedGB) / Double(config.totalMemoryGB)
+        let blockUsageRatio = kvCacheStats.utilizationPercent / 100.0
+
+        // Use worst of memory or block utilization
+        let usageRatio = max(memoryUsageRatio, blockUsageRatio)
 
         if usageRatio > 0.90 {
             logger.warning("Critical memory pressure", metadata: [
                 "allocated_gb": "\(allocatedGB)",
                 "total_gb": "\(config.totalMemoryGB)",
-                "usage": "\(String(format: "%.1f", usageRatio * 100))%"
+                "memory_usage": "\(String(format: "%.1f", memoryUsageRatio * 100))%",
+                "block_usage": "\(String(format: "%.1f", kvCacheStats.utilizationPercent))%",
+                "used_blocks": "\(kvCacheStats.usedBlocks)",
+                "total_blocks": "\(kvCacheStats.totalBlocks)"
             ])
             return .critical
         } else if usageRatio > 0.80 {
             logger.info("High memory pressure", metadata: [
                 "allocated_gb": "\(allocatedGB)",
-                "usage": "\(String(format: "%.1f", usageRatio * 100))%"
+                "memory_usage": "\(String(format: "%.1f", memoryUsageRatio * 100))%",
+                "block_usage": "\(String(format: "%.1f", kvCacheStats.utilizationPercent))%"
             ])
             return .high
         } else {
@@ -139,12 +149,23 @@ public actor GPUMonitor {
         }
     }
 
-    /// Estimate allocated memory in GB
+    /// Estimate allocated memory in GB using real MLX tracking
+    /// Phase 4.3: Uses MLX.memoryAllocated() and KV cache stats
+    /// - Parameter kvCacheStats: KV cache memory statistics
     /// - Returns: Estimated memory usage in GB
-    private func estimateAllocatedMemoryGB() -> Int {
-        // TODO: Phase 4 - Integrate with MLX.memoryAllocated()
-        // For now, return a conservative estimate
-        return 0  // Placeholder - will be replaced with actual MLX memory tracking
+    private func estimateAllocatedMemoryGB(kvCacheStats: MemoryStats) -> Int {
+        // Get real MLX memory allocation (Phase 4.3)
+        let mlxAllocatedBytes = MLX.Memory.activeMemory
+        let mlxAllocatedGB = mlxAllocatedBytes / (1024 * 1024 * 1024)
+
+        // Estimate KV cache memory (rough approximation)
+        // Assume each token uses ~2KB for K/V (fp16, typical model dimensions)
+        let kvCacheBytes = kvCacheStats.usedTokenCapacity * 2048
+        let kvCacheGB = kvCacheBytes / (1024 * 1024 * 1024)
+
+        let totalGB = mlxAllocatedGB + kvCacheGB
+
+        return Int(totalGB)
     }
 
     // MARK: - Statistics

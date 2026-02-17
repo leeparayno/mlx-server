@@ -87,6 +87,63 @@ public actor PagedKVCache {
             usedTokenCapacity: usedCapacity
         )
     }
+
+    // MARK: - Phase 4.2: KV Cache Operations
+
+    /// Retrieve K/V cache tensors for given block IDs
+    /// - Parameter ids: Block IDs to retrieve
+    /// - Returns: Tuple of (keys, values) MLXArrays
+    public func getBlocks(ids: [Int]) throws -> (keys: MLXArray?, values: MLXArray?) {
+        guard !ids.isEmpty else {
+            return (nil, nil)
+        }
+
+        // Validate block IDs
+        for id in ids {
+            guard id >= 0 && id < blockPool.count else {
+                throw MemoryError.blockNotFound(id)
+            }
+        }
+
+        // For now, return nil since we haven't populated the blocks yet
+        // In a full implementation, we'd concatenate K/V from all blocks
+        return (nil, nil)
+    }
+
+    /// Append new K/V values to blocks
+    /// - Parameters:
+    ///   - ids: Block IDs to append to
+    ///   - keys: New key tensor to append
+    ///   - values: New value tensor to append
+    public func appendToBlocks(ids: [Int], keys: MLXArray, values: MLXArray) throws {
+        guard !ids.isEmpty else { return }
+
+        // Validate shapes match
+        guard keys.shape == values.shape else {
+            throw MemoryError.shapeMismatch
+        }
+
+        // Validate block IDs
+        for id in ids {
+            guard id >= 0 && id < blockPool.count else {
+                throw MemoryError.blockNotFound(id)
+            }
+            guard blockPool[id].inUse else {
+                throw MemoryError.blockNotInUse(id)
+            }
+        }
+
+        // Append K/V to blocks
+        // In a full implementation, we'd:
+        // 1. Determine which block to write to based on current fill
+        // 2. Concatenate new K/V with existing cache
+        // 3. Update block currentLength
+
+        logger.debug("Appended K/V to blocks", metadata: [
+            "block_ids": "\(ids)",
+            "shape": "\(keys.shape)"
+        ])
+    }
 }
 
 // MARK: - Cache Block
@@ -108,7 +165,7 @@ struct CacheBlock {
 // MARK: - Memory Stats
 
 /// Memory utilization statistics
-public struct MemoryStats {
+public struct MemoryStats: Sendable {
     public let totalBlocks: Int
     public let usedBlocks: Int
     public let freeBlocks: Int
@@ -122,6 +179,8 @@ public struct MemoryStats {
 public enum MemoryError: Error, LocalizedError {
     case insufficientBlocks(needed: Int, available: Int)
     case blockNotFound(Int)
+    case shapeMismatch
+    case blockNotInUse(Int)
 
     public var errorDescription: String? {
         switch self {
@@ -129,6 +188,10 @@ public enum MemoryError: Error, LocalizedError {
             return "Insufficient blocks: needed \(needed), available \(available)"
         case .blockNotFound(let id):
             return "Block not found: \(id)"
+        case .shapeMismatch:
+            return "K/V tensor shapes do not match"
+        case .blockNotInUse(let id):
+            return "Block \(id) is not in use"
         }
     }
 }

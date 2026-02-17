@@ -1,7 +1,10 @@
 import Foundation
 import ArgumentParser
 import Logging
+import Vapor
 import Core
+import Scheduler
+import API
 
 @main
 struct MLXServerCommand: AsyncParsableCommand {
@@ -11,22 +14,22 @@ struct MLXServerCommand: AsyncParsableCommand {
         version: "0.1.0"
     )
 
-    @Option(name: .shortAndLong, help: "Server port")
+    @ArgumentParser.Option(name: .shortAndLong, help: "Server port")
     var port: Int = 8080
 
-    @Option(name: .shortAndLong, help: "Model path or Hugging Face model ID")
+    @ArgumentParser.Option(name: .shortAndLong, help: "Model path or Hugging Face model ID")
     var model: String = "mlx-community/Qwen2.5-0.5B-Instruct-4bit"
 
-    @Option(name: .shortAndLong, help: "Configuration file path")
+    @ArgumentParser.Option(name: .shortAndLong, help: "Configuration file path")
     var config: String?
 
-    @Option(name: .long, help: "Log level (trace, debug, info, warning, error)")
+    @ArgumentParser.Option(name: .long, help: "Log level (trace, debug, info, warning, error)")
     var logLevel: String = "info"
 
-    @Flag(name: .long, help: "Enable detailed logging")
+    @ArgumentParser.Flag(name: .long, help: "Enable detailed logging")
     var verbose: Bool = false
 
-    @Flag(name: .long, help: "Test mode: load model, run single inference, and exit")
+    @ArgumentParser.Flag(name: .long, help: "Test mode: load model, run single inference, and exit")
     var test: Bool = false
 
     func run() async throws {
@@ -79,15 +82,52 @@ struct MLXServerCommand: AsyncParsableCommand {
                 return
             }
 
-            // TODO: Phase 5 - Start API server
+            // Phase 5: Start API server
             logger.info("🌐 Starting API server on port \(port)...")
-            logger.warning("⚠️  API server not yet implemented")
 
-            logger.info("✅ Server initialized successfully")
-            logger.info("💡 Press Ctrl+C to stop the server")
+            // Initialize scheduler and batcher
+            logger.info("📋 Initializing request scheduler...")
+            let scheduler = RequestScheduler()
 
-            // Keep running
-            try await Task.sleep(for: .seconds(3600))
+            logger.info("🔄 Initializing continuous batcher...")
+            let batcher = ContinuousBatcher(
+                scheduler: scheduler,
+                engine: engine,
+                config: ContinuousBatcher.Config(maxBatchSize: 32, eosTokenId: 2)
+            )
+
+            // Start batching loop in background
+            logger.info("▶️  Starting continuous batching loop...")
+            Task {
+                await batcher.start()
+            }
+
+            // Small delay to ensure batcher starts
+            try await Task.sleep(for: .milliseconds(100))
+
+            // Create and configure Vapor application
+            let app = try await Application.make(.detect())
+
+            do {
+                // Configure server
+                app.http.server.configuration.hostname = "0.0.0.0"
+                app.http.server.configuration.port = port
+
+                // Configure routes
+                try routes(app, scheduler: scheduler, engine: engine, batcher: batcher)
+
+                logger.info("✅ Server initialized successfully")
+                logger.info("🚀 Server running on http://0.0.0.0:\(port)")
+                logger.info("💡 Press Ctrl+C to stop the server")
+
+                // Run server (blocks until shutdown)
+                try await app.execute()
+            } catch {
+                try await app.asyncShutdown()
+                throw error
+            }
+
+            try await app.asyncShutdown()
 
         } catch {
             logger.error("❌ Failed to start server: \(error.localizedDescription)")

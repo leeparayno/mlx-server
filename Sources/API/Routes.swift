@@ -3,16 +3,63 @@ import Core
 import Scheduler
 
 /// Configure API routes
-public func routes(_ app: Application, scheduler: RequestScheduler? = nil) throws {
-    // Health check endpoint
-    app.get("health") { req async -> Response in
-        return Response(status: .ok, body: .init(string: "OK"))
+public func routes(_ app: Application, scheduler: RequestScheduler? = nil, engine: InferenceEngine? = nil, batcher: ContinuousBatcher? = nil) throws {
+    // Add Request ID middleware (Phase 5.4)
+    app.middleware.use(RequestIDMiddleware())
+
+    // Health check endpoint (Phase 5.4)
+    app.get("health") { req async -> HealthResponse in
+        let modelLoaded = await engine?.isModelLoaded ?? false
+        let batcherRunning = await batcher?.running ?? false
+
+        return HealthResponse(
+            status: modelLoaded && batcherRunning ? "healthy" : "degraded",
+            model: modelLoaded ? "loaded" : "not_loaded",
+            batcher: batcherRunning ? "running" : "stopped",
+            timestamp: Date()
+        )
     }
 
     // Readiness check endpoint
     app.get("ready") { req async -> Response in
-        // TODO: Check if model is loaded and ready
-        return Response(status: .ok, body: .init(string: "Ready"))
+        // Check if model is loaded and batcher is running
+        let modelLoaded = await engine?.isModelLoaded ?? false
+        let batcherRunning = await batcher?.running ?? false
+        let ready = modelLoaded && batcherRunning
+
+        return Response(status: ready ? .ok : .serviceUnavailable, body: .init(string: ready ? "Ready" : "Not Ready"))
+    }
+
+    // Metrics endpoint (Phase 5.4)
+    app.get("metrics") { req async throws -> MetricsResponse in
+        guard let scheduler = scheduler, let batcher = batcher else {
+            throw Abort(.internalServerError, reason: "Scheduler or batcher not initialized")
+        }
+
+        let schedulerStats = await scheduler.stats
+        let batcherStats = await batcher.getStats()
+        let gpuStats = await batcher.getGPUStats()
+
+        return MetricsResponse(
+            requests: RequestMetrics(
+                pending: schedulerStats.currentPending,
+                active: schedulerStats.currentActive,
+                completed: schedulerStats.totalCompleted,
+                failed: schedulerStats.totalFailed,
+                cancelled: schedulerStats.totalCancelled
+            ),
+            batcher: BatcherMetrics(
+                activeSlots: batcherStats.activeSlots,
+                totalSlots: batcherStats.totalSlots,
+                utilization: batcherStats.utilization,
+                stepCount: batcherStats.stepCount
+            ),
+            gpu: GPUMetrics(
+                averageUtilization: gpuStats.averageUtilization,
+                currentUtilization: gpuStats.currentUtilization,
+                sampleCount: gpuStats.sampleCount
+            )
+        )
     }
 
     // Cancel request endpoint (Phase 3.2)
@@ -30,30 +77,222 @@ public func routes(_ app: Application, scheduler: RequestScheduler? = nil) throw
         return .noContent
     }
 
-    // OpenAI-compatible completions endpoint
-    app.post("v1", "completions") { req async throws -> CompletionResponse in
+    // OpenAI-compatible completions endpoint (Phase 5.1 + 5.2)
+    app.post("v1", "completions") { req async throws -> Response in
         let request = try req.content.decode(CompletionRequest.self)
 
-        // TODO: Phase 5 - Implement completion endpoint
-        // 1. Validate request
-        // 2. Submit to scheduler
-        // 3. Wait for completion
-        // 4. Return response
+        // Validate scheduler is available
+        guard let scheduler = scheduler else {
+            throw Abort(.internalServerError, reason: "Scheduler not initialized")
+        }
 
-        throw Abort(.notImplemented, reason: "Completions endpoint not yet implemented")
+        // Validate request
+        guard !request.prompt.isEmpty else {
+            throw Abort(.badRequest, reason: "Prompt cannot be empty")
+        }
+
+        // Create inference request
+        let inferenceRequest = InferenceRequest(
+            prompt: request.prompt,
+            maxTokens: request.maxTokens ?? 100,
+            temperature: request.temperature ?? 0.7
+        )
+
+        // Submit to scheduler
+        let (requestId, stream) = await scheduler.submit(
+            inferenceRequest,
+            priority: .normal
+        )
+
+        // Check if streaming is requested
+        if request.stream == true {
+            // SSE Streaming mode (Phase 5.2)
+            return Response.sse(req) { writer in
+                let created = Int(Date().timeIntervalSince1970)
+
+                do {
+                    // Stream tokens as they arrive
+                    for try await chunk in stream {
+                        let streamChunk = CompletionStreamChunk(
+                            id: requestId.uuidString,
+                            created: created,
+                            model: request.model,
+                            choices: [
+                                CompletionStreamChoice(
+                                    text: chunk.token,
+                                    index: 0,
+                                    finishReason: nil
+                                )
+                            ]
+                        )
+
+                        let json = try JSONEncoder().encode(streamChunk)
+                        let jsonString = String(data: json, encoding: .utf8)!
+                        try await writer.send(data: jsonString)
+                    }
+
+                    // Send final chunk with finish_reason
+                    let finalChunk = CompletionStreamChunk(
+                        id: requestId.uuidString,
+                        created: created,
+                        model: request.model,
+                        choices: [
+                            CompletionStreamChoice(
+                                text: "",
+                                index: 0,
+                                finishReason: "stop"
+                            )
+                        ]
+                    )
+                    let finalJson = try JSONEncoder().encode(finalChunk)
+                    let finalJsonString = String(data: finalJson, encoding: .utf8)!
+                    try await writer.send(data: finalJsonString)
+
+                    // Send [DONE] message
+                    try await writer.send(data: "[DONE]")
+                } catch {
+                    req.logger.error("Streaming error: \(error)")
+                    throw error
+                }
+            }
+        } else {
+            // Non-streaming mode (Phase 5.1)
+            var fullText = ""
+            do {
+                for try await chunk in stream {
+                    fullText += chunk.token
+                }
+            } catch {
+                throw Abort(.internalServerError, reason: "Generation failed: \(error.localizedDescription)")
+            }
+
+            // Return OpenAI-compatible response
+            let response = CompletionResponse(
+                id: requestId.uuidString,
+                created: Int(Date().timeIntervalSince1970),
+                model: request.model,
+                choices: [
+                    CompletionChoice(
+                        text: fullText,
+                        index: 0,
+                        finishReason: "stop"
+                    )
+                ]
+            )
+
+            return try await response.encodeResponse(for: req)
+        }
     }
 
-    // OpenAI-compatible chat completions endpoint
-    app.post("v1", "chat", "completions") { req async throws -> ChatCompletionResponse in
+    // OpenAI-compatible chat completions endpoint (Phase 5.3)
+    app.post("v1", "chat", "completions") { req async throws -> Response in
         let request = try req.content.decode(ChatCompletionRequest.self)
 
-        // TODO: Phase 5 - Implement chat completion endpoint
-        // 1. Convert chat messages to prompt
-        // 2. Submit to scheduler
-        // 3. Handle streaming if requested
-        // 4. Return response
+        // Validate scheduler is available
+        guard let scheduler = scheduler else {
+            throw Abort(.internalServerError, reason: "Scheduler not initialized")
+        }
 
-        throw Abort(.notImplemented, reason: "Chat completions endpoint not yet implemented")
+        // Validate request
+        guard !request.messages.isEmpty else {
+            throw Abort(.badRequest, reason: "Messages cannot be empty")
+        }
+
+        // Convert chat messages to prompt
+        let formatter = ChatTemplateFormatter()
+        let prompt = formatter.format(messages: request.messages)
+
+        // Create inference request
+        let inferenceRequest = InferenceRequest(
+            prompt: prompt,
+            maxTokens: request.maxTokens ?? 100,
+            temperature: request.temperature ?? 0.7
+        )
+
+        // Submit to scheduler
+        let (requestId, stream) = await scheduler.submit(
+            inferenceRequest,
+            priority: .normal
+        )
+
+        // Check if streaming is requested
+        if request.stream == true {
+            // SSE Streaming mode
+            return Response.sse(req) { writer in
+                let created = Int(Date().timeIntervalSince1970)
+
+                do {
+                    // Stream tokens as they arrive
+                    for try await chunk in stream {
+                        let streamChunk = ChatCompletionStreamChunk(
+                            id: requestId.uuidString,
+                            created: created,
+                            model: request.model,
+                            choices: [
+                                ChatStreamChoice(
+                                    delta: ChatMessage(role: "assistant", content: chunk.token),
+                                    index: 0,
+                                    finishReason: nil
+                                )
+                            ]
+                        )
+
+                        let json = try JSONEncoder().encode(streamChunk)
+                        let jsonString = String(data: json, encoding: .utf8)!
+                        try await writer.send(data: jsonString)
+                    }
+
+                    // Send final chunk with finish_reason
+                    let finalChunk = ChatCompletionStreamChunk(
+                        id: requestId.uuidString,
+                        created: created,
+                        model: request.model,
+                        choices: [
+                            ChatStreamChoice(
+                                delta: ChatMessage(role: "assistant", content: ""),
+                                index: 0,
+                                finishReason: "stop"
+                            )
+                        ]
+                    )
+                    let finalJson = try JSONEncoder().encode(finalChunk)
+                    let finalJsonString = String(data: finalJson, encoding: .utf8)!
+                    try await writer.send(data: finalJsonString)
+
+                    // Send [DONE] message
+                    try await writer.send(data: "[DONE]")
+                } catch {
+                    req.logger.error("Chat streaming error: \(error)")
+                    throw error
+                }
+            }
+        } else {
+            // Non-streaming mode
+            var fullText = ""
+            do {
+                for try await chunk in stream {
+                    fullText += chunk.token
+                }
+            } catch {
+                throw Abort(.internalServerError, reason: "Generation failed: \(error.localizedDescription)")
+            }
+
+            // Return OpenAI-compatible response
+            let response = ChatCompletionResponse(
+                id: requestId.uuidString,
+                created: Int(Date().timeIntervalSince1970),
+                model: request.model,
+                choices: [
+                    ChatCompletionChoice(
+                        message: ChatMessage(role: "assistant", content: fullText),
+                        index: 0,
+                        finishReason: "stop"
+                    )
+                ]
+            )
+
+            return try await response.encodeResponse(for: req)
+        }
     }
 }
 
@@ -135,5 +374,188 @@ struct ChatCompletionChoice: Content {
         case message
         case index
         case finishReason = "finish_reason"
+    }
+}
+
+// MARK: - Observability Models (Phase 5.4)
+
+struct HealthResponse: Content {
+    let status: String
+    let model: String
+    let batcher: String
+    let timestamp: Date
+}
+
+struct MetricsResponse: Content {
+    let requests: RequestMetrics
+    let batcher: BatcherMetrics
+    let gpu: GPUMetrics
+}
+
+struct RequestMetrics: Content {
+    let pending: Int
+    let active: Int
+    let completed: Int
+    let failed: Int
+    let cancelled: Int
+}
+
+struct BatcherMetrics: Content {
+    let activeSlots: Int
+    let totalSlots: Int
+    let utilization: Double
+    let stepCount: Int
+
+    enum CodingKeys: String, CodingKey {
+        case activeSlots = "active_slots"
+        case totalSlots = "total_slots"
+        case utilization
+        case stepCount = "step_count"
+    }
+}
+
+struct GPUMetrics: Content {
+    let averageUtilization: Double
+    let currentUtilization: Double
+    let sampleCount: Int
+
+    enum CodingKeys: String, CodingKey {
+        case averageUtilization = "average_utilization"
+        case currentUtilization = "current_utilization"
+        case sampleCount = "sample_count"
+    }
+}
+
+// MARK: - Streaming Response Models
+
+struct CompletionStreamChunk: Content {
+    let id: String
+    let object: String = "text_completion.chunk"
+    let created: Int
+    let model: String
+    let choices: [CompletionStreamChoice]
+}
+
+struct CompletionStreamChoice: Content {
+    let text: String
+    let index: Int
+    let finishReason: String?
+
+    enum CodingKeys: String, CodingKey {
+        case text
+        case index
+        case finishReason = "finish_reason"
+    }
+}
+
+struct ChatCompletionStreamChunk: Content {
+    let id: String
+    let object: String = "chat.completion.chunk"
+    let created: Int
+    let model: String
+    let choices: [ChatStreamChoice]
+}
+
+struct ChatStreamChoice: Content {
+    let delta: ChatMessage
+    let index: Int
+    let finishReason: String?
+
+    enum CodingKeys: String, CodingKey {
+        case delta
+        case index
+        case finishReason = "finish_reason"
+    }
+}
+
+// MARK: - SSE Helper
+
+extension Response {
+    /// Create a Server-Sent Events (SSE) response for streaming
+    static func sse(
+        _ req: Request,
+        onStream: @escaping @Sendable (SSEWriter) async throws -> Void
+    ) -> Response {
+        Response(
+            status: .ok,
+            headers: HTTPHeaders([
+                ("Content-Type", "text/event-stream"),
+                ("Cache-Control", "no-cache"),
+                ("Connection", "keep-alive"),
+                ("X-Accel-Buffering", "no")
+            ]),
+            body: .init(managedAsyncStream: { writer in
+                let sseWriter = SSEWriter(writer: writer)
+                do {
+                    try await onStream(sseWriter)
+                } catch {
+                    req.logger.error("SSE stream error: \(error)")
+                }
+            })
+        )
+    }
+}
+
+struct SSEWriter: Sendable {
+    let writer: AsyncBodyStreamWriter
+
+    func send(event: String? = nil, data: String) async throws {
+        var message = ""
+        if let event = event {
+            message += "event: \(event)\n"
+        }
+        message += "data: \(data)\n\n"
+        try await writer.write(.buffer(.init(string: message)))
+    }
+}
+
+// MARK: - Request ID Middleware (Phase 5.4)
+
+struct RequestIDMiddleware: AsyncMiddleware {
+    func respond(to request: Request, chainingTo next: AsyncResponder) async throws -> Response {
+        // Get or generate request ID
+        let requestID = request.headers.first(name: "X-Request-ID") ?? UUID().uuidString
+
+        // Add to request headers if not present
+        if request.headers.first(name: "X-Request-ID") == nil {
+            request.headers.add(name: "X-Request-ID", value: requestID)
+        }
+
+        // Call next responder
+        var response = try await next.respond(to: request)
+
+        // Add to response headers
+        response.headers.add(name: "X-Request-ID", value: requestID)
+
+        return response
+    }
+}
+
+// MARK: - Chat Template Formatter
+
+struct ChatTemplateFormatter {
+    /// Convert chat messages to prompt using template format
+    /// Format: <|system|>...<|user|>...<|assistant|>
+    func format(messages: [ChatMessage]) -> String {
+        var prompt = ""
+
+        for message in messages {
+            switch message.role {
+            case "system":
+                prompt += "<|system|>\n\(message.content)\n"
+            case "user":
+                prompt += "<|user|>\n\(message.content)\n"
+            case "assistant":
+                prompt += "<|assistant|>\n\(message.content)\n"
+            default:
+                // Ignore unknown roles
+                break
+            }
+        }
+
+        // Add assistant prefix for generation
+        prompt += "<|assistant|>\n"
+
+        return prompt
     }
 }
