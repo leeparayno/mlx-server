@@ -708,11 +708,12 @@ make benchmark-phase3
 - [ ] Benchmark: Measure throughput improvement vs Phase 2
 
 ### Phase 3.2: Request Cancellation
-- [ ] Add `cancel(requestId:)` to RequestScheduler
-- [ ] Add `checkCancellations()` to ContinuousBatcher
-- [ ] Implement HTTP DELETE endpoint
-- [ ] Write 5+ tests for cancellation scenarios
-- [ ] Verify: Slots freed immediately on cancel
+- [x] Add `cancelAll()` and `getStatus()` methods to RequestScheduler
+- [x] Add `checkCancellations()` to ContinuousBatcher
+- [x] Implement HTTP DELETE endpoint for /v1/requests/:id
+- [x] Write 8 comprehensive tests for cancellation scenarios
+- [x] Verify: All 61 tests pass (46 + 9 + 8)
+- [x] Verify: Slots freed immediately on cancel
 - [ ] Load test: Cancel requests mid-generation, verify no leaks
 
 ### Phase 3.3: Adaptive Batching

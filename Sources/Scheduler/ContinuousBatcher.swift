@@ -106,6 +106,9 @@ public actor ContinuousBatcher {
         // 5. Cleanup finished slots
         cleanupFinishedSlots()
 
+        // 6. Check for cancellations
+        await checkCancellations()
+
         let queueLen = await scheduler.queueLength
         logger.trace("Batching step completed", metadata: [
             "step": "\(stepCount)",
@@ -249,6 +252,27 @@ public actor ContinuousBatcher {
             if let slot = slots[i], slot.isFinished {
                 slots[i] = nil
                 logger.trace("Slot freed", metadata: ["slot_id": "\(i)"])
+            }
+        }
+    }
+
+    /// Check for cancelled requests and free their slots
+    private func checkCancellations() async {
+        for i in 0..<slots.count {
+            guard let slot = slots[i] else { continue }
+
+            // Check if request was cancelled
+            if let status = await scheduler.getStatus(requestId: slot.request.id),
+               status == .cancelled {
+                // Free the slot immediately
+                slots[i] = nil
+
+                logger.debug("Slot freed due to cancellation", metadata: [
+                    "slot_id": "\(i)",
+                    "request_id": "\(slot.request.id)"
+                ])
+
+                // Note: KV cache blocks will be released in Phase 4
             }
         }
     }

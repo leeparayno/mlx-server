@@ -1,0 +1,134 @@
+import Foundation
+import MLX
+import Core
+import Logging
+
+/// Implements PagedAttention-style KV cache management
+/// Divides memory into fixed-size pages (blocks) for efficient allocation
+public actor PagedKVCache {
+    private let logger = Logger(label: "paged-kv-cache")
+    private let blockSize: Int  // Tokens per block (e.g., 16)
+    private let numBlocks: Int   // Total blocks available
+    private var blockPool: [CacheBlock]
+    private var requestBlocks: [UUID: [Int]]  // Request ID -> Block IDs
+
+    public init(blockSize: Int = 16, numBlocks: Int = 1024) {
+        self.blockSize = blockSize
+        self.numBlocks = numBlocks
+        self.blockPool = (0..<numBlocks).map { CacheBlock(id: $0, blockSize: blockSize) }
+        self.requestBlocks = [:]
+    }
+
+    /// Allocate blocks for a new request
+    /// - Parameters:
+    ///   - requestId: Request identifier
+    ///   - numTokens: Number of tokens needed
+    /// - Returns: Allocated block IDs
+    public func allocate(for requestId: UUID, numTokens: Int) throws -> [Int] {
+        let blocksNeeded = (numTokens + blockSize - 1) / blockSize  // Ceiling division
+
+        // Find free blocks
+        let freeBlocks = blockPool.enumerated()
+            .filter { !$0.element.inUse }
+            .prefix(blocksNeeded)
+            .map { $0.offset }
+
+        guard freeBlocks.count == blocksNeeded else {
+            throw MemoryError.insufficientBlocks(needed: blocksNeeded, available: freeBlocks.count)
+        }
+
+        // Mark blocks as in use
+        for blockId in freeBlocks {
+            blockPool[blockId].inUse = true
+        }
+
+        requestBlocks[requestId] = Array(freeBlocks)
+
+        logger.debug("Allocated blocks", metadata: [
+            "request_id": "\(requestId)",
+            "blocks": "\(freeBlocks.count)",
+            "tokens": "\(numTokens)"
+        ])
+
+        return Array(freeBlocks)
+    }
+
+    /// Release blocks for a completed request
+    /// - Parameter requestId: Request identifier
+    public func release(for requestId: UUID) {
+        guard let blockIds = requestBlocks.removeValue(forKey: requestId) else {
+            return
+        }
+
+        // Mark blocks as free
+        for blockId in blockIds {
+            blockPool[blockId].inUse = false
+            blockPool[blockId].clear()
+        }
+
+        logger.debug("Released blocks", metadata: [
+            "request_id": "\(requestId)",
+            "blocks": "\(blockIds.count)"
+        ])
+    }
+
+    /// Get memory utilization statistics
+    public var stats: MemoryStats {
+        let usedBlocks = blockPool.filter { $0.inUse }.count
+        let totalCapacity = numBlocks * blockSize
+        let usedCapacity = usedBlocks * blockSize
+
+        return MemoryStats(
+            totalBlocks: numBlocks,
+            usedBlocks: usedBlocks,
+            freeBlocks: numBlocks - usedBlocks,
+            utilizationPercent: Double(usedBlocks) / Double(numBlocks) * 100,
+            totalTokenCapacity: totalCapacity,
+            usedTokenCapacity: usedCapacity
+        )
+    }
+}
+
+// MARK: - Cache Block
+
+/// Represents a single block in the paged cache
+struct CacheBlock {
+    let id: Int
+    let blockSize: Int
+    var inUse: Bool = false
+    var keys: MLXArray?
+    var values: MLXArray?
+
+    mutating func clear() {
+        keys = nil
+        values = nil
+    }
+}
+
+// MARK: - Memory Stats
+
+/// Memory utilization statistics
+public struct MemoryStats {
+    public let totalBlocks: Int
+    public let usedBlocks: Int
+    public let freeBlocks: Int
+    public let utilizationPercent: Double
+    public let totalTokenCapacity: Int
+    public let usedTokenCapacity: Int
+}
+
+// MARK: - Errors
+
+public enum MemoryError: Error, LocalizedError {
+    case insufficientBlocks(needed: Int, available: Int)
+    case blockNotFound(Int)
+
+    public var errorDescription: String? {
+        switch self {
+        case .insufficientBlocks(let needed, let available):
+            return "Insufficient blocks: needed \(needed), available \(available)"
+        case .blockNotFound(let id):
+            return "Block not found: \(id)"
+        }
+    }
+}

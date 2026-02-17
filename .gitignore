@@ -1,0 +1,82 @@
+# Swift Package Manager
+.build/
+.swiftpm/
+!.swiftpm/xcode/xcshareddata/xcschemes/
+Packages/
+xcuserdata/
+DerivedData/
+
+# Xcode (if generated)
+*.xcodeproj
+!default.xcodeproj
+*.xcworkspace
+!default.xcworkspace
+*.pbxuser
+!default.pbxuser
+*.mode1v3
+!default.mode1v3
+*.mode2v3
+!default.mode2v3
+*.perspectivev3
+!default.perspectivev3
+*.moved-aside
+
+# Build artifacts
+*.o
+*.swiftmodule
+*.swiftdoc
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+.AppleDB
+.AppleDesktop
+Network Trash Folder
+Temporary Items
+.apdisk
+
+# Editor files
+*.swp
+*~
+.vscode/
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+.idea/
+
+# Models (too large for git)
+models/*.safetensors
+models/*.gguf
+models/*.bin
+
+# Logs
+logs/
+*.log
+
+# Configuration (may contain secrets)
+config/local.yaml
+config/secrets.yaml
+.env
+.env.local
+
+# Benchmark results
+benchmarks/results/*.json
+benchmarks/results/*.csv
+
+# Profiling data
+*.trace
+*.profdata
