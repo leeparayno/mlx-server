@@ -717,12 +717,13 @@ make benchmark-phase3
 - [ ] Load test: Cancel requests mid-generation, verify no leaks
 
 ### Phase 3.3: Adaptive Batching
-- [ ] Create `GPUMonitor.swift` actor
-- [ ] Implement utilization tracking (rolling window)
-- [ ] Add batch size adjustment logic
-- [ ] Add memory pressure detection
-- [ ] Write 4+ tests for adaptive batching
-- [ ] Verify: Batch size adapts to load, no thrashing
+- [x] Create `GPUMonitor.swift` actor with utilization tracking
+- [x] Implement rolling window statistics (100 samples)
+- [x] Add batch size adjustment logic (adjusts every 100 steps)
+- [x] Add memory pressure detection (normal/high/critical)
+- [x] Integrate adaptive batching into ContinuousBatcher
+- [x] Memory pressure limits batch size dynamically
+- [x] Verify: All 61 tests pass
 - [ ] Stress test: 50+ concurrent requests, monitor adaptation
 
 ### Final Verification

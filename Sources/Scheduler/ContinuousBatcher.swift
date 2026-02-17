@@ -9,11 +9,13 @@ public actor ContinuousBatcher {
 
     // Slot management
     private var slots: [BatchSlot?]
-    private let maxBatchSize: Int
+    private var currentMaxBatchSize: Int
+    private let initialMaxBatchSize: Int
 
     // Dependencies
     private let scheduler: RequestScheduler
     private let engine: InferenceEngine
+    private let gpuMonitor: GPUMonitor
 
     // State
     private var isRunning: Bool = false
@@ -40,8 +42,12 @@ public actor ContinuousBatcher {
         self.scheduler = scheduler
         self.engine = engine
         self.config = config
-        self.maxBatchSize = config.maxBatchSize
+        self.initialMaxBatchSize = config.maxBatchSize
+        self.currentMaxBatchSize = config.maxBatchSize
         self.slots = Array(repeating: nil, count: config.maxBatchSize)
+        self.gpuMonitor = GPUMonitor(config: GPUMonitor.Config(
+            maxBatchSize: config.maxBatchSize
+        ))
     }
 
     // MARK: - Main Loop
@@ -55,7 +61,7 @@ public actor ContinuousBatcher {
 
         isRunning = true
         logger.info("Starting continuous batcher", metadata: [
-            "max_batch_size": "\(maxBatchSize)"
+            "initial_max_batch_size": "\(initialMaxBatchSize)"
         ])
 
         while isRunning {
@@ -109,11 +115,21 @@ public actor ContinuousBatcher {
         // 6. Check for cancellations
         await checkCancellations()
 
+        // 7. Adjust batch size every 100 steps (Phase 3.3)
+        if stepCount % 100 == 0 {
+            await adjustBatchSize()
+        }
+
+        // 8. Record utilization
+        let utilization = Double(activeSlotCount) / Double(currentMaxBatchSize)
+        await gpuMonitor.recordUtilization(utilization)
+
         let queueLen = await scheduler.queueLength
         logger.trace("Batching step completed", metadata: [
             "step": "\(stepCount)",
             "active_slots": "\(activeSlotCount)",
-            "pending_queue": "\(queueLen)"
+            "pending_queue": "\(queueLen)",
+            "utilization": "\(String(format: "%.2f", utilization))"
         ])
     }
 
@@ -121,15 +137,40 @@ public actor ContinuousBatcher {
 
     /// Fill empty slots with pending requests
     private func fillEmptySlots() async {
+        // Check memory pressure (Phase 3.3)
+        let memoryPressure = await gpuMonitor.checkMemoryPressure()
+
+        // Calculate effective max batch size based on memory pressure
+        var effectiveMaxBatchSize = currentMaxBatchSize
+        switch memoryPressure {
+        case .critical:
+            // Don't add new requests if memory critical
+            effectiveMaxBatchSize = min(effectiveMaxBatchSize, activeSlotCount)
+            logger.warning("Critical memory pressure, limiting batch size", metadata: [
+                "current_active": "\(activeSlotCount)",
+                "max_batch_size": "\(currentMaxBatchSize)"
+            ])
+        case .high:
+            // Reduce to half if memory high
+            effectiveMaxBatchSize = min(effectiveMaxBatchSize, currentMaxBatchSize / 2)
+            logger.info("High memory pressure, reducing batch size", metadata: [
+                "effective_max": "\(effectiveMaxBatchSize)"
+            ])
+        case .normal:
+            break
+        }
+
         var emptySlotCount = 0
         for slot in slots where slot == nil {
             emptySlotCount += 1
         }
 
-        guard emptySlotCount > 0 else { return }
+        // Limit empty slot count by effective max batch size
+        let targetEmptySlots = min(emptySlotCount, effectiveMaxBatchSize - activeSlotCount)
+        guard targetEmptySlots > 0 else { return }
 
         // Dequeue requests from scheduler
-        let newRequests = await scheduler.dequeueNextBatch(size: emptySlotCount)
+        let newRequests = await scheduler.dequeueNextBatch(size: targetEmptySlots)
 
         guard !newRequests.isEmpty else { return }
 
@@ -282,12 +323,29 @@ public actor ContinuousBatcher {
         return tokenId == config.eosTokenId
     }
 
+    /// Adjust batch size based on utilization (Phase 3.3)
+    private func adjustBatchSize() async {
+        let newMaxBatchSize = await gpuMonitor.recommendBatchSizeAdjustment(
+            current: currentMaxBatchSize
+        )
+
+        if newMaxBatchSize != currentMaxBatchSize {
+            let avgUtil = await gpuMonitor.averageUtilization()
+            logger.info("Adjusting batch size", metadata: [
+                "old_size": "\(currentMaxBatchSize)",
+                "new_size": "\(newMaxBatchSize)",
+                "utilization": "\(String(format: "%.2f", avgUtil))"
+            ])
+            currentMaxBatchSize = newMaxBatchSize
+        }
+    }
+
     // MARK: - Observability
 
     /// Get current batch utilization
     public var utilization: Double {
         let active = activeSlotCount
-        return Double(active) / Double(maxBatchSize)
+        return Double(active) / Double(currentMaxBatchSize)
     }
 
     /// Count of active (non-finished) slots
@@ -299,10 +357,15 @@ public actor ContinuousBatcher {
     public func getStats() async -> (activeSlots: Int, totalSlots: Int, utilization: Double, stepCount: Int) {
         return (
             activeSlots: activeSlotCount,
-            totalSlots: maxBatchSize,
+            totalSlots: currentMaxBatchSize,
             utilization: utilization,
             stepCount: stepCount
         )
+    }
+
+    /// Get GPU monitor statistics
+    public func getGPUStats() async -> (averageUtilization: Double, currentUtilization: Double, sampleCount: Int) {
+        return await gpuMonitor.stats()
     }
 }
 
