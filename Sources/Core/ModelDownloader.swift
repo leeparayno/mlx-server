@@ -7,10 +7,15 @@ public struct ModelDownloader: Sendable {
     private let logger = Logger(label: "model-downloader")
     private let cacheDirectory: URL
     private let hubApi: HubApi
+    private let maxRetries: Int
+    private let initialRetryDelay: TimeInterval
 
     /// Initialize a new model downloader
-    /// - Parameter cacheDirectory: Directory to cache downloaded models (defaults to ~/.cache/mlx-models/)
-    public init(cacheDirectory: URL? = nil) {
+    /// - Parameters:
+    ///   - cacheDirectory: Directory to cache downloaded models (defaults to ~/.cache/mlx-models/)
+    ///   - maxRetries: Maximum number of retry attempts for transient network errors (defaults to 3)
+    ///   - initialRetryDelay: Initial delay between retries in seconds (defaults to 1.0, uses exponential backoff)
+    public init(cacheDirectory: URL? = nil, maxRetries: Int = 3, initialRetryDelay: TimeInterval = 1.0) {
         if let cacheDirectory = cacheDirectory {
             self.cacheDirectory = cacheDirectory
         } else {
@@ -23,9 +28,12 @@ public struct ModelDownloader: Sendable {
 
         // Use Hub API with the cache directory
         self.hubApi = HubApi(downloadBase: self.cacheDirectory)
+        self.maxRetries = maxRetries
+        self.initialRetryDelay = initialRetryDelay
 
         logger.info("ModelDownloader initialized", metadata: [
-            "cache_directory": "\(self.cacheDirectory.path)"
+            "cache_directory": "\(self.cacheDirectory.path)",
+            "max_retries": "\(maxRetries)"
         ])
     }
 
@@ -46,64 +54,125 @@ public struct ModelDownloader: Sendable {
         ])
 
         let startTime = Date()
+        var lastError: Error?
 
-        do {
-            // Download the model snapshot using HubApi
-            // This automatically handles caching - if files are already downloaded, it returns immediately
-            let modelPath = try await hubApi.snapshot(
-                from: modelId,
-                revision: revision
-            ) { progress, speed in
-                // Report progress
-                progressHandler?(progress, speed)
+        // Retry loop with exponential backoff
+        for attempt in 0...maxRetries {
+            do {
+                // Download the model snapshot using HubApi
+                // This automatically handles caching - if files are already downloaded, it returns immediately
+                let modelPath = try await hubApi.snapshot(
+                    from: modelId,
+                    revision: revision
+                ) { progress, speed in
+                    // Report progress
+                    progressHandler?(progress, speed)
 
-                // Log progress periodically
-                if progress.fractionCompleted.truncatingRemainder(dividingBy: 0.1) < 0.01 {
-                    let speedStr = speed.map { String(format: "%.2f MB/s", $0 / 1024 / 1024) } ?? "unknown"
-                    self.logger.info("Download progress", metadata: [
-                        "model_id": "\(modelId)",
-                        "progress": "\(String(format: "%.1f%%", progress.fractionCompleted * 100))",
-                        "speed": "\(speedStr)"
-                    ])
+                    // Log progress periodically
+                    if progress.fractionCompleted.truncatingRemainder(dividingBy: 0.1) < 0.01 {
+                        let speedStr = speed.map { String(format: "%.2f MB/s", $0 / 1024 / 1024) } ?? "unknown"
+                        self.logger.info("Download progress", metadata: [
+                            "model_id": "\(modelId)",
+                            "progress": "\(String(format: "%.1f%%", progress.fractionCompleted * 100))",
+                            "speed": "\(speedStr)"
+                        ])
+                    }
                 }
-            }
 
-            let downloadTime = Date().timeIntervalSince(startTime)
-            logger.info("Model download completed", metadata: [
-                "model_id": "\(modelId)",
-                "path": "\(modelPath.path)",
-                "duration_seconds": "\(String(format: "%.2f", downloadTime))"
-            ])
+                let downloadTime = Date().timeIntervalSince(startTime)
+                logger.info("Model download completed", metadata: [
+                    "model_id": "\(modelId)",
+                    "path": "\(modelPath.path)",
+                    "duration_seconds": "\(String(format: "%.2f", downloadTime))",
+                    "attempts": "\(attempt + 1)"
+                ])
 
-            return modelPath
+                return modelPath
 
-        } catch let error as Hub.HubClientError {
-            // Convert Hub errors to our error type
-            logger.error("Model download failed", metadata: [
-                "model_id": "\(modelId)",
-                "error": "\(error.localizedDescription)"
-            ])
+            } catch let error as Hub.HubClientError {
+                lastError = error
 
-            switch error {
-            case .fileNotFound, .resourceNotFound:
-                throw ModelDownloaderError.modelNotFound(modelId)
-            case .networkError(let urlError):
-                throw ModelDownloaderError.networkError(urlError.localizedDescription)
-            case .authorizationRequired:
-                throw ModelDownloaderError.authenticationRequired
-            case .httpStatusCode(let code):
-                throw ModelDownloaderError.downloadFailed("HTTP error: \(code)")
-            default:
+                // Check if this is a retryable error
+                let isRetryable = isRetryableError(error)
+
+                logger.warning("Model download attempt failed", metadata: [
+                    "model_id": "\(modelId)",
+                    "attempt": "\(attempt + 1)",
+                    "max_attempts": "\(maxRetries + 1)",
+                    "error": "\(error.localizedDescription)",
+                    "retryable": "\(isRetryable)"
+                ])
+
+                // If not retryable or we've exhausted retries, throw the error
+                if !isRetryable || attempt >= maxRetries {
+                    logger.error("Model download failed", metadata: [
+                        "model_id": "\(modelId)",
+                        "total_attempts": "\(attempt + 1)",
+                        "error": "\(error.localizedDescription)"
+                    ])
+
+                    // Convert Hub errors to our error type
+                    switch error {
+                    case .fileNotFound, .resourceNotFound:
+                        throw ModelDownloaderError.modelNotFound(modelId)
+                    case .networkError(let urlError):
+                        throw ModelDownloaderError.networkError(urlError.localizedDescription)
+                    case .authorizationRequired:
+                        throw ModelDownloaderError.authenticationRequired
+                    case .httpStatusCode(let code):
+                        throw ModelDownloaderError.downloadFailed("HTTP error: \(code)")
+                    default:
+                        throw ModelDownloaderError.downloadFailed(error.localizedDescription)
+                    }
+                }
+
+                // Calculate exponential backoff delay
+                let delay = initialRetryDelay * pow(2.0, Double(attempt))
+                logger.info("Retrying download", metadata: [
+                    "model_id": "\(modelId)",
+                    "delay_seconds": "\(String(format: "%.1f", delay))",
+                    "next_attempt": "\(attempt + 2)"
+                ])
+
+                // Wait before retrying
+                try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+
+            } catch {
+                // Handle other errors (non-retryable)
+                logger.error("Model download failed", metadata: [
+                    "model_id": "\(modelId)",
+                    "error": "\(error.localizedDescription)"
+                ])
                 throw ModelDownloaderError.downloadFailed(error.localizedDescription)
             }
+        }
 
-        } catch {
-            // Handle other errors
-            logger.error("Model download failed", metadata: [
-                "model_id": "\(modelId)",
-                "error": "\(error.localizedDescription)"
-            ])
-            throw ModelDownloaderError.downloadFailed(error.localizedDescription)
+        // Should never reach here, but just in case
+        throw lastError ?? ModelDownloaderError.downloadFailed("Download failed after \(maxRetries + 1) attempts")
+    }
+
+    /// Check if an error is retryable (transient network error)
+    private func isRetryableError(_ error: Hub.HubClientError) -> Bool {
+        switch error {
+        case .networkError(let urlError):
+            // Retry on transient network errors
+            switch urlError.code {
+            case .timedOut,
+                 .cannotFindHost,
+                 .cannotConnectToHost,
+                 .networkConnectionLost,
+                 .dnsLookupFailed,
+                 .notConnectedToInternet:
+                return true
+            default:
+                return false
+            }
+        case .httpStatusCode(let code):
+            // Retry on specific HTTP status codes (5xx server errors, 429 rate limit)
+            return code >= 500 || code == 429
+        default:
+            // Don't retry on other errors (file not found, authentication, etc.)
+            return false
         }
     }
 
