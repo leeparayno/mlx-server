@@ -6,6 +6,9 @@ import Logging
 /// Actor-based inference engine that coordinates with the scheduler
 /// Currently a simple wrapper around mlx-swift-lm - will be enhanced for Option 2
 public actor InferenceEngine {
+    /// Default model ID for quick initialization
+    public static let defaultModelID = "mlx-community/Qwen2.5-0.5B-Instruct-4bit"
+
     private var modelContainer: ModelContainer?
     private let logger = Logger(label: "inference-engine")
 
@@ -18,6 +21,46 @@ public actor InferenceEngine {
         logger.info("Inference engine initialized", metadata: [
             "model": "\(configuration.id)"
         ])
+    }
+
+    /// Convenience method to initialize with default model
+    /// Loads the default small model (Qwen2.5-0.5B-Instruct-4bit) automatically
+    /// - Parameters:
+    ///   - modelPath: Optional model ID or path (defaults to defaultModelID)
+    ///   - progressHandler: Optional callback for download progress
+    /// - Throws: ModelLoaderError if model cannot be loaded
+    public func initialize(
+        modelPath: String? = nil,
+        progressHandler: (@Sendable (Progress, Double?) -> Void)? = nil
+    ) async throws {
+        let modelId = modelPath ?? Self.defaultModelID
+
+        logger.info("Loading model", metadata: ["model_id": "\(modelId)"])
+
+        // Create model loader
+        let loader = ModelLoader()
+
+        // Load model with progress tracking
+        // ModelLoader will automatically use cache if available
+        do {
+            let modelContainer = try await loader.load(
+                modelPath: modelId,
+                progressHandler: progressHandler
+            )
+
+            // Initialize with loaded container
+            await initialize(modelContainer: modelContainer)
+
+            logger.info("Model loaded successfully", metadata: [
+                "model_id": "\(modelId)"
+            ])
+        } catch {
+            logger.error("Failed to load model", metadata: [
+                "model_id": "\(modelId)",
+                "error": "\(error.localizedDescription)"
+            ])
+            throw error
+        }
     }
 
     /// Check if model is loaded
@@ -359,7 +402,7 @@ public actor InferenceEngine {
 // MARK: - Model Info
 
 /// Information about the loaded model
-public struct ModelInfo {
+public struct ModelInfo: Sendable {
     public let name: String
     public let id: String
 
