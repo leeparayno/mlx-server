@@ -182,7 +182,7 @@ public struct ModelDownloader: Sendable {
     ///   - revision: Git revision (defaults to "main")
     /// - Returns: true if the model is cached
     public func isModelCached(modelId: String, revision: String = "main") -> Bool {
-        guard let modelPath = getCachedModelPath(modelId: modelId) else {
+        guard let modelPath = getCachedModelPath(modelId: modelId, revision: revision) else {
             return false
         }
 
@@ -206,9 +206,11 @@ public struct ModelDownloader: Sendable {
     }
 
     /// Get the local cache path for a model without downloading
-    /// - Parameter modelId: Hugging Face model ID
+    /// - Parameters:
+    ///   - modelId: Hugging Face model ID
+    ///   - revision: Git revision (defaults to "main")
     /// - Returns: URL to where the model would be cached, or nil if invalid
-    public func getCachedModelPath(modelId: String) -> URL? {
+    public func getCachedModelPath(modelId: String, revision: String = "main") -> URL? {
         // Parse model ID (e.g., "mlx-community/Qwen2.5-0.5B-Instruct-4bit")
         let components = modelId.split(separator: "/")
         guard components.count == 2 else {
@@ -216,15 +218,15 @@ public struct ModelDownloader: Sendable {
             return nil
         }
 
-        // Construct cache path: cache_dir/models--org--name/snapshots/main/
+        // Construct cache path: cache_dir/models/org/name/
+        // This matches the Hub API's actual cache structure
         let org = components[0]
         let name = components[1]
-        let repoName = "models--\(org)--\(name)"
 
         return cacheDirectory
-            .appendingPathComponent(repoName)
-            .appendingPathComponent("snapshots")
-            .appendingPathComponent("main")
+            .appendingPathComponent("models")
+            .appendingPathComponent(String(org))
+            .appendingPathComponent(String(name))
     }
 
     /// Clear the model cache

@@ -157,4 +157,27 @@ final class ModelDownloaderTests: XCTestCase {
         let nowCached = downloader.isModelCached(modelId: testModelId)
         XCTAssertTrue(nowCached, "Model should be cached after download")
     }
+
+    func testClearCache() async throws {
+        // Create a temporary cache directory for this test
+        let tempCache = FileManager.default.temporaryDirectory
+            .appendingPathComponent("test-mlx-clear-cache-\(UUID().uuidString)")
+
+        let downloader = ModelDownloader(cacheDirectory: tempCache)
+
+        // Download the model
+        _ = try await downloader.download(modelId: testModelId)
+
+        // Verify it's cached
+        XCTAssertTrue(downloader.isModelCached(modelId: testModelId), "Model should be cached after download")
+
+        // Clear the specific model from cache
+        try downloader.clearCache(modelId: testModelId)
+
+        // Verify it's no longer cached
+        XCTAssertFalse(downloader.isModelCached(modelId: testModelId), "Model should not be cached after clearing")
+
+        // Cleanup
+        try? FileManager.default.removeItem(at: tempCache)
+    }
 }

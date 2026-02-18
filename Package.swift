@@ -91,6 +91,14 @@ let package = Package(
         .package(
             url: "https://github.com/apple/swift-async-algorithms",
             from: "1.1.2"
+        ),
+
+        // Swift Transformers - Hugging Face Hub API (v1.1.6+)
+        // - Required for ModelDownloader Hub API access
+        // - Provides Hub module for model downloading
+        .package(
+            url: "https://github.com/huggingface/swift-transformers",
+            from: "1.1.6"
         )
     ],
 
@@ -119,6 +127,7 @@ let package = Package(
                 .product(name: "MLXRandom", package: "mlx-swift"),
                 .product(name: "MLXNN", package: "mlx-swift"),
                 .product(name: "MLXLLM", package: "mlx-swift-lm"),
+                .product(name: "Hub", package: "swift-transformers"),
                 .product(name: "Logging", package: "swift-log")
             ],
             path: "Sources/Core"
