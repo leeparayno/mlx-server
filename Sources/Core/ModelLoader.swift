@@ -8,20 +8,35 @@ import Logging
 /// Currently uses mlx-swift-lm (Option 1) - will transition to custom implementation (Option 2) later
 public actor ModelLoader {
     private let logger = Logger(label: "model-loader")
+    private let downloader: ModelDownloader
 
-    public init() {}
+    public init(downloader: ModelDownloader? = nil) {
+        self.downloader = downloader ?? ModelDownloader()
+    }
 
     /// Load a model from Hugging Face Hub or local path
-    /// - Parameter modelPath: HF model ID (e.g., "mlx-community/Llama-3.2-1B-Instruct-4bit") or local path
+    /// - Parameters:
+    ///   - modelPath: HF model ID (e.g., "mlx-community/Llama-3.2-1B-Instruct-4bit") or local path
+    ///   - progressHandler: Optional callback for download progress (if model needs to be downloaded)
     /// - Returns: Loaded model container
-    public func load(modelPath: String) async throws -> ModelContainer {
+    public func load(
+        modelPath: String,
+        progressHandler: (@Sendable (Progress, Double?) -> Void)? = nil
+    ) async throws -> ModelContainer {
         logger.info("Loading model from: \(modelPath)")
 
         let startTime = Date()
 
         // Load using mlx-swift-lm's loadModelContainer function
+        // Note: loadModelContainer internally handles downloading via Hub API
         logger.info("Initializing model with mlx-swift-lm...")
-        let modelContainer = try await MLXLMCommon.loadModelContainer(id: modelPath)
+        let modelContainer = try await MLXLMCommon.loadModelContainer(
+            id: modelPath,
+            progressHandler: { progress in
+                // Convert Progress to our format with optional speed
+                progressHandler?(progress, nil)
+            }
+        )
 
         let loadTime = Date().timeIntervalSince(startTime)
         let configuration = await modelContainer.configuration
@@ -34,6 +49,26 @@ public actor ModelLoader {
         logMemoryUsage()
 
         return modelContainer
+    }
+
+    /// Download a model without loading it (useful for pre-caching)
+    /// - Parameters:
+    ///   - modelId: HF model ID (e.g., "mlx-community/Qwen2.5-0.5B-Instruct-4bit")
+    ///   - progressHandler: Optional callback for download progress (progress, speed in bytes/sec)
+    /// - Returns: URL to the downloaded model directory
+    public func download(
+        modelId: String,
+        progressHandler: (@Sendable (Progress, Double?) -> Void)? = nil
+    ) async throws -> URL {
+        let localDownloader = downloader
+        return try await localDownloader.download(modelId: modelId, progressHandler: progressHandler)
+    }
+
+    /// Check if a model is already cached locally
+    /// - Parameter modelId: HF model ID
+    /// - Returns: true if the model is cached
+    public func isModelCached(modelId: String) -> Bool {
+        return downloader.isModelCached(modelId: modelId)
     }
 
     /// Log current memory usage
