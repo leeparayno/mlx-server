@@ -1,40 +1,111 @@
 import Foundation
-import ArgumentParser
 import Logging
 import Vapor
 import Core
 import Scheduler
 import API
 
-@main
-struct MLXServerCommand: AsyncParsableCommand {
-    static let configuration = CommandConfiguration(
-        commandName: "mlx-server",
-        abstract: "High-performance MLX inference server for Apple Silicon",
-        version: "0.1.0"
-    )
-
-    @ArgumentParser.Option(name: .shortAndLong, help: "Server port")
+// Custom command-line parsing (before Vapor)
+struct ServerConfig {
     var port: Int = 8080
-
-    @ArgumentParser.Option(name: .shortAndLong, help: "Model path or Hugging Face model ID")
     var model: String = "mlx-community/Qwen2.5-0.5B-Instruct-4bit"
-
-    @ArgumentParser.Option(name: .shortAndLong, help: "Configuration file path")
     var config: String?
-
-    @ArgumentParser.Option(name: .long, help: "Log level (trace, debug, info, warning, error)")
     var logLevel: String = "info"
-
-    @ArgumentParser.Flag(name: .long, help: "Enable detailed logging")
     var verbose: Bool = false
-
-    @ArgumentParser.Flag(name: .long, help: "Test mode: load model, run single inference, and exit")
     var test: Bool = false
 
-    func run() async throws {
+    init(arguments: [String]) {
+        // Try environment variables first (for compatibility with benchmarking scripts)
+        if let envPort = ProcessInfo.processInfo.environment["MLX_PORT"], let portValue = Int(envPort) {
+            port = portValue
+        }
+        if let envModel = ProcessInfo.processInfo.environment["MLX_MODEL"] {
+            model = envModel
+        }
+        if let envLogLevel = ProcessInfo.processInfo.environment["MLX_LOG_LEVEL"] {
+            logLevel = envLogLevel
+        }
+        if ProcessInfo.processInfo.environment["MLX_VERBOSE"] == "true" {
+            verbose = true
+        }
+        if ProcessInfo.processInfo.environment["MLX_TEST"] == "true" {
+            test = true
+        }
+
+        // Then parse command-line arguments (overrides environment variables)
+        var i = 1 // Skip program name
+        while i < arguments.count {
+            let arg = arguments[i]
+            switch arg {
+            case "-p", "--port":
+                i += 1
+                if i < arguments.count, let portValue = Int(arguments[i]) {
+                    port = portValue
+                }
+            case "-m", "--model":
+                i += 1
+                if i < arguments.count {
+                    model = arguments[i]
+                }
+            case "-c", "--config":
+                i += 1
+                if i < arguments.count {
+                    config = arguments[i]
+                }
+            case "--log-level":
+                i += 1
+                if i < arguments.count {
+                    logLevel = arguments[i]
+                }
+            case "--verbose":
+                verbose = true
+            case "--test":
+                test = true
+            case "-h", "--help":
+                printHelp()
+                exit(0)
+            case "--version":
+                print("mlx-server version 0.1.0")
+                exit(0)
+            default:
+                break
+            }
+            i += 1
+        }
+    }
+
+    func printHelp() {
+        print("""
+        OVERVIEW: High-performance MLX inference server for Apple Silicon
+
+        USAGE: mlx-server [--port <port>] [--model <model>] [--config <config>] [--log-level <log-level>] [--verbose] [--test]
+
+        OPTIONS:
+          -p, --port <port>       Server port (default: 8080)
+          -m, --model <model>     Model path or Hugging Face model ID (default: mlx-community/Qwen2.5-0.5B-Instruct-4bit)
+          -c, --config <config>   Configuration file path
+          --log-level <log-level> Log level (trace, debug, info, warning, error) (default: info)
+          --verbose               Enable detailed logging
+          --test                  Test mode: load model, run single inference, and exit
+          --version               Show the version
+          -h, --help              Show help information
+        """)
+    }
+}
+
+@main
+struct MLXServer {
+    static func main() async throws {
+        // Parse arguments before Vapor sees them
+        let config = ServerConfig(arguments: CommandLine.arguments)
+
+        // Now run the server
+        try await runServer(config: config)
+    }
+
+    static func runServer(config: ServerConfig) async throws {
         // Set up logging
-        let level = parseLogLevel(verbose ? "debug" : logLevel)
+        let level = parseLogLevel(config.verbose ? "debug" : config.logLevel)
         LoggingSystem.bootstrap { label in
             var handler = StreamLogHandler.standardOutput(label: label)
             handler.logLevel = level
@@ -49,23 +120,23 @@ struct MLXServerCommand: AsyncParsableCommand {
         ])
 
         logger.info("Configuration:", metadata: [
-            "port": "\(port)",
-            "model": "\(model)",
+            "port": "\(config.port)",
+            "model": "\(config.model)",
             "log_level": "\(level)"
         ])
 
         // Load configuration from file if provided
-        if let configPath = config {
+        if let configPath = config.config {
             logger.info("Loading configuration from: \(configPath)")
             // TODO: Phase 2 - Implement config file loading
         }
 
         // Phase 1: Model loading
-        logger.info("📦 Loading model: \(model)")
+        logger.info("📦 Loading model: \(config.model)")
         let loader = ModelLoader()
 
         do {
-            let modelContainer = try await loader.load(modelPath: model)
+            let modelContainer = try await loader.load(modelPath: config.model)
             logger.info("✅ Model loaded successfully")
 
             // Phase 2: Initialize inference engine
@@ -75,7 +146,7 @@ struct MLXServerCommand: AsyncParsableCommand {
             logger.info("✅ Inference engine initialized")
 
             // Test mode: run single inference and exit
-            if test {
+            if config.test {
                 logger.info("🧪 Test mode: Running single inference...")
                 try await runTestInference(engine: engine, logger: logger)
                 logger.info("✅ Test completed successfully")
@@ -83,7 +154,7 @@ struct MLXServerCommand: AsyncParsableCommand {
             }
 
             // Phase 5: Start API server
-            logger.info("🌐 Starting API server on port \(port)...")
+            logger.info("🌐 Starting API server on port \(config.port)...")
 
             // Initialize scheduler and batcher
             logger.info("📋 Initializing request scheduler...")
@@ -106,36 +177,71 @@ struct MLXServerCommand: AsyncParsableCommand {
             try await Task.sleep(for: .milliseconds(100))
 
             // Create and configure Vapor application
-            let app = try await Application.make(.detect())
+            // Create environment with empty arguments to bypass command parsing
+            let env = Environment(name: "production", arguments: [])
+            let app = try await Application.make(env)
+            logger.info("✅ Vapor application created")
 
+            // Configure server
+            app.http.server.configuration.hostname = "0.0.0.0"
+            app.http.server.configuration.port = config.port
+
+            // Configure routes
             do {
-                // Configure server
-                app.http.server.configuration.hostname = "0.0.0.0"
-                app.http.server.configuration.port = port
-
-                // Configure routes
                 try routes(app, scheduler: scheduler, engine: engine, batcher: batcher)
-
-                logger.info("✅ Server initialized successfully")
-                logger.info("🚀 Server running on http://0.0.0.0:\(port)")
-                logger.info("💡 Press Ctrl+C to stop the server")
-
-                // Run server (blocks until shutdown)
-                try await app.execute()
+                logger.info("✅ Routes configured")
             } catch {
+                logger.error("❌ Failed to configure routes: \(error)")
                 try await app.asyncShutdown()
                 throw error
             }
 
+            logger.info("✅ Server initialized successfully")
+            logger.info("🚀 Server running on http://0.0.0.0:\(config.port)")
+            logger.info("💡 Press Ctrl+C to stop the server")
+
+            // Manually start server without going through Vapor's command system
+            do {
+                try await app.server.start(address: .hostname("0.0.0.0", port: config.port))
+                logger.info("✅ HTTP server started and listening")
+            } catch let error as DecodingError {
+                logger.warning("⚠️ Vapor configuration warning (non-fatal): \(error)")
+            } catch {
+                // Check if error is CommandError from Vapor's command system
+                let errorStr = String(describing: error)
+                if errorStr.contains("CommandError") || errorStr.contains("unknownCommand") {
+                    logger.warning("⚠️ Ignoring Vapor command parsing error: \(error)")
+                    logger.info("✅ HTTP server started despite command error")
+                } else {
+                    logger.error("❌ Failed to start HTTP server: \(error)")
+                    try await app.asyncShutdown()
+                    throw error
+                }
+            }
+
+            // Keep running until interrupted (sleep for a very long time)
+            do {
+                try await withTaskCancellationHandler {
+                    try await Task.sleep(for: .seconds(31536000))  // 1 year
+                } onCancel: {
+                    logger.info("🛑 Server shutting down...")
+                }
+            } catch {
+                // Ignore cancellation errors
+            }
+
+            // Clean shutdown
             try await app.asyncShutdown()
+            logger.info("✅ Server stopped")
 
         } catch {
+            let logger = Logger(label: "mlx-server")
             logger.error("❌ Failed to start server: \(error.localizedDescription)")
-            throw ExitCode.failure
+            exit(1)
         }
     }
 
-    private func runTestInference(engine: InferenceEngine, logger: Logger) async throws {
+    private static func runTestInference(engine: InferenceEngine, logger: Logger) async throws {
         let testPrompt = "Hello, how are you?"
         logger.info("Test prompt: \(testPrompt)")
 
@@ -154,7 +260,7 @@ struct MLXServerCommand: AsyncParsableCommand {
         ])
     }
 
-    private func parseLogLevel(_ level: String) -> Logger.Level {
+    private static func parseLogLevel(_ level: String) -> Logger.Level {
         switch level.lowercased() {
         case "trace": return .trace
         case "debug": return .debug

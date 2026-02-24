@@ -53,12 +53,16 @@ test:
 	@echo "🧪 Running unit tests..."
 	xcodebuild test -workspace $(WORKSPACE) -scheme mlx-server-Package -destination $(DESTINATION)
 
-# Build and run benchmarks
+# Run benchmarking (uses bash scripts due to Metal shader requirements)
 benchmark:
-	@echo "🔨 Building benchmarks..."
-	xcodebuild build -workspace $(WORKSPACE) -scheme mlx-benchmark -destination $(DESTINATION)
 	@echo "📊 Running benchmarks..."
-	@find ~/Library/Developer/Xcode/DerivedData -name "mlx-benchmark" -path "*/Debug/mlx-benchmark" -type f 2>/dev/null | head -1 | xargs -I {} {} --model mlx-community/Qwen2.5-0.5B-Instruct-4bit --iterations 100
+	@echo "NOTE: Using bash scripts instead of Swift CLI due to Metal shader compilation requirements"
+	@echo ""
+	@echo "Running memory leak test (100 requests)..."
+	@ITERATIONS=100 ./scripts/memory_test.sh
+	@echo ""
+	@echo "Running load test (16 concurrent, 100 requests)..."
+	@./scripts/load_test_enhanced.sh 16 100 50
 
 # Clean build artifacts
 clean:

@@ -112,9 +112,9 @@ let package = Package(
                 "Scheduler",
                 "Memory",
                 "API",
-                .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 .product(name: "Logging", package: "swift-log"),
-                .product(name: "Metrics", package: "swift-metrics")
+                .product(name: "Metrics", package: "swift-metrics"),
+                .product(name: "Vapor", package: "vapor")
             ],
             path: "Sources/MLXServer"
         ),

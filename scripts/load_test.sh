@@ -25,9 +25,11 @@ echo "=========================================="
 MLXSERVER=""
 if [ -f "./mlx-server" ]; then
     MLXSERVER="./mlx-server"
-elif [ -f "~/Library/Developer/Xcode/DerivedData/mlx-server-*/Build/Products/Debug/mlx-server" ]; then
-    MLXSERVER=$(find ~/Library/Developer/Xcode/DerivedData -name "mlx-server" -type f -path "*/Build/Products/Debug/mlx-server" | head -n 1)
 else
+    MLXSERVER=$(find ~/Library/Developer/Xcode/DerivedData -name "mlx-server" -type f -path "*/Build/Products/Debug/mlx-server" 2>/dev/null | head -n 1)
+fi
+
+if [ -z "$MLXSERVER" ]; then
     echo "Error: mlx-server executable not found"
     echo "Please run 'make build' first"
     exit 1
@@ -38,7 +40,8 @@ echo "Using executable: $MLXSERVER"
 # Start server
 echo ""
 echo "Starting server..."
-$MLXSERVER --model "$MODEL" --port $PORT &
+# Use environment variables to avoid Vapor command parsing conflicts
+MLX_MODEL="$MODEL" MLX_PORT=$PORT $MLXSERVER &
 SERVER_PID=$!
 
 # Cleanup function

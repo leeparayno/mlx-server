@@ -86,23 +86,29 @@ public actor ContinuousBatcher {
     }
 
     /// Stop the continuous batching loop
-    public func stop() {
+    public func stop() async {
         isRunning = false
+
+        // Final cleanup pass: check for cancellations and free slots
+        await checkCancellations()
     }
 
     /// Execute one batching step
     internal func step() async throws {
         stepCount += 1
 
-        // 1. Fill empty slots from scheduler
+        // 1. Check for cancellations first (before early return)
+        await checkCancellations()
+
+        // 2. Fill empty slots from scheduler
         await fillEmptySlots()
 
-        // 2. Prepare batch input
+        // 3. Prepare batch input
         guard let batchInput = prepareBatchInput() else {
             return  // No active slots
         }
 
-        // 3. Batched forward pass (Phase 4.2: with KV cache and sampling params)
+        // 4. Batched forward pass (Phase 4.2: with KV cache and sampling params)
         let nextTokens = try await engine.forwardBatch(
             tokenIds: batchInput.tokenIds,
             positions: batchInput.positions,
@@ -112,14 +118,11 @@ public actor ContinuousBatcher {
             topP: Array(repeating: 0.95, count: batchInput.tokenIds.count)  // TODO: from request config
         )
 
-        // 4. Update slots with new tokens
+        // 5. Update slots with new tokens
         await updateSlots(nextTokens: nextTokens, activeIndices: batchInput.activeIndices)
 
-        // 5. Cleanup finished slots
+        // 6. Cleanup finished slots
         await cleanupFinishedSlots()
-
-        // 6. Check for cancellations
-        await checkCancellations()
 
         // 7. Adjust batch size every 100 steps (Phase 3.3)
         if stepCount % 100 == 0 {
