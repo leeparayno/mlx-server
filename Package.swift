@@ -112,6 +112,7 @@ let package = Package(
                 "Scheduler",
                 "Memory",
                 "API",
+                "Authentication",
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "Metrics", package: "swift-metrics"),
                 .product(name: "Vapor", package: "vapor")
@@ -163,10 +164,21 @@ let package = Package(
                 "Core",
                 "Scheduler",
                 "Memory",
+                "Authentication",
                 .product(name: "Vapor", package: "vapor"),
                 .product(name: "Logging", package: "swift-log")
             ],
             path: "Sources/API"
+        ),
+
+        // Authentication and authorization
+        .target(
+            name: "Authentication",
+            dependencies: [
+                .product(name: "Vapor", package: "vapor"),
+                .product(name: "Logging", package: "swift-log")
+            ],
+            path: "Sources/Authentication"
         ),
 
         // Benchmark executable
@@ -200,9 +212,22 @@ let package = Package(
                 "Core",
                 "Scheduler",
                 "Memory",
+                "Authentication",
                 .product(name: "XCTVapor", package: "vapor")
             ],
             path: "Tests/APITests"
+        ),
+
+        .testTarget(
+            name: "AuthenticationTests",
+            dependencies: [
+                "Authentication",
+                .product(name: "XCTVapor", package: "vapor")
+            ],
+            path: "Tests/AuthenticationTests",
+            swiftSettings: [
+                .unsafeFlags(["-strict-concurrency=minimal"])
+            ]
         )
     ]
 )

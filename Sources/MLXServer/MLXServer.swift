@@ -4,6 +4,7 @@ import Vapor
 import Core
 import Scheduler
 import API
+import Authentication
 
 // Custom command-line parsing (before Vapor)
 struct ServerConfig {
@@ -186,9 +187,20 @@ struct MLXServer {
             app.http.server.configuration.hostname = "0.0.0.0"
             app.http.server.configuration.port = config.port
 
+            // Phase 6: Initialize authentication
+            logger.info("🔐 Initializing authentication...")
+            let apiKeyStore = APIKeyStore()
+            let rateLimiter = RateLimiter()
+
+            // Create default API key for testing
+            let defaultKey = await apiKeyStore.validate("sk-test-12345")
+            if defaultKey != nil {
+                logger.info("✅ Default API key available: sk-test-12345")
+            }
+
             // Configure routes
             do {
-                try routes(app, scheduler: scheduler, engine: engine, batcher: batcher)
+                try routes(app, scheduler: scheduler, engine: engine, batcher: batcher, apiKeyStore: apiKeyStore, rateLimiter: rateLimiter)
                 logger.info("✅ Routes configured")
             } catch {
                 logger.error("❌ Failed to configure routes: \(error)")

@@ -1,9 +1,10 @@
 import Vapor
 import Core
 import Scheduler
+import Authentication
 
 /// Configure API routes
-public func routes(_ app: Application, scheduler: RequestScheduler? = nil, engine: InferenceEngine? = nil, batcher: ContinuousBatcher? = nil) throws {
+public func routes(_ app: Application, scheduler: RequestScheduler? = nil, engine: InferenceEngine? = nil, batcher: ContinuousBatcher? = nil, apiKeyStore: APIKeyStore? = nil, rateLimiter: RateLimiter? = nil) throws {
     // Add Request ID middleware (Phase 5.4)
     app.middleware.use(RequestIDMiddleware())
 
@@ -62,8 +63,19 @@ public func routes(_ app: Application, scheduler: RequestScheduler? = nil, engin
         )
     }
 
+    // Phase 6.1: Protected routes (require authentication)
+    let protected: RoutesBuilder
+    if let keyStore = apiKeyStore, let limiter = rateLimiter {
+        // Authentication enabled: protect v1 API endpoints
+        let authMiddleware = APIKeyMiddleware(keyStore: keyStore, rateLimiter: limiter)
+        protected = app.grouped(authMiddleware)
+    } else {
+        // No authentication: use app directly (for backward compatibility/testing)
+        protected = app
+    }
+
     // Cancel request endpoint (Phase 3.2)
-    app.delete("v1", "requests", ":id") { req async throws -> HTTPStatus in
+    protected.delete("v1", "requests", ":id") { req async throws -> HTTPStatus in
         guard let requestIdString = req.parameters.get("id"),
               let requestId = UUID(uuidString: requestIdString) else {
             throw Abort(.badRequest, reason: "Invalid request ID format")
@@ -78,7 +90,7 @@ public func routes(_ app: Application, scheduler: RequestScheduler? = nil, engin
     }
 
     // OpenAI-compatible completions endpoint (Phase 5.1 + 5.2)
-    app.post("v1", "completions") { req async throws -> Response in
+    protected.post("v1", "completions") { req async throws -> Response in
         let request = try req.content.decode(CompletionRequest.self)
 
         // Validate scheduler is available
@@ -185,7 +197,7 @@ public func routes(_ app: Application, scheduler: RequestScheduler? = nil, engin
     }
 
     // OpenAI-compatible chat completions endpoint (Phase 5.3)
-    app.post("v1", "chat", "completions") { req async throws -> Response in
+    protected.post("v1", "chat", "completions") { req async throws -> Response in
         let request = try req.content.decode(ChatCompletionRequest.self)
 
         // Validate scheduler is available
