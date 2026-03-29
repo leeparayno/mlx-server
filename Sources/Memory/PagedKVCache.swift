@@ -9,12 +9,14 @@ public actor PagedKVCache {
     private let logger = Logger(label: "paged-kv-cache")
     private let blockSize: Int  // Tokens per block (e.g., 16)
     private let numBlocks: Int   // Total blocks available
+    private let quantization: QuantizationConfig
     private var blockPool: [CacheBlock]
     private var requestBlocks: [UUID: [Int]]  // Request ID -> Block IDs
 
-    public init(blockSize: Int = 16, numBlocks: Int = 1024) {
+    public init(blockSize: Int = 16, numBlocks: Int = 1024, quantization: QuantizationConfig = QuantizationConfig()) {
         self.blockSize = blockSize
         self.numBlocks = numBlocks
+        self.quantization = quantization
         self.blockPool = (0..<numBlocks).map { CacheBlock(id: $0, blockSize: blockSize) }
         self.requestBlocks = [:]
     }
@@ -107,6 +109,16 @@ public actor PagedKVCache {
 
         // For now, return nil since we haven't populated the blocks yet
         // In a full implementation, we'd concatenate K/V from all blocks
+        if ids.count == 1 {
+            let block = blockPool[ids[0]]
+            if let kq = block.quantizedKeys, let vq = block.quantizedValues {
+                let keys = TurboQuantMLX.dequantize(kq)
+                let values = TurboQuantMLX.dequantize(vq)
+                return (keys, values)
+            }
+            return (block.keys, block.values)
+        }
+
         return (nil, nil)
     }
 
@@ -139,9 +151,25 @@ public actor PagedKVCache {
         // 2. Concatenate new K/V with existing cache
         // 3. Update block currentLength
 
+        // For now, store the latest K/V in the first block for scaffolding
+        if let first = ids.first {
+            if quantization.enabled {
+                blockPool[first].quantizedKeys = TurboQuantMLX.quantize(keys, bitWidth: quantization.bitWidth)
+                blockPool[first].quantizedValues = TurboQuantMLX.quantize(values, bitWidth: quantization.bitWidth)
+                blockPool[first].keys = nil
+                blockPool[first].values = nil
+            } else {
+                blockPool[first].keys = keys
+                blockPool[first].values = values
+                blockPool[first].quantizedKeys = nil
+                blockPool[first].quantizedValues = nil
+            }
+        }
+
         logger.debug("Appended K/V to blocks", metadata: [
             "block_ids": "\(ids)",
-            "shape": "\(keys.shape)"
+            "shape": "\(keys.shape)",
+            "quantized": "\(quantization.enabled)"
         ])
     }
 }
@@ -155,10 +183,14 @@ struct CacheBlock {
     var inUse: Bool = false
     var keys: MLXArray?
     var values: MLXArray?
+    var quantizedKeys: QuantizedVector?
+    var quantizedValues: QuantizedVector?
 
     mutating func clear() {
         keys = nil
         values = nil
+        quantizedKeys = nil
+        quantizedValues = nil
     }
 }
 
