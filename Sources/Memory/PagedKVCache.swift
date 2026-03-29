@@ -154,8 +154,8 @@ public actor PagedKVCache {
         // For now, store the latest K/V in the first block for scaffolding
         if let first = ids.first {
             if quantization.enabled {
-                blockPool[first].quantizedKeys = TurboQuantMLX.quantize(keys, bitWidth: quantization.bitWidth)
-                blockPool[first].quantizedValues = TurboQuantMLX.quantize(values, bitWidth: quantization.bitWidth)
+                blockPool[first].quantizedKeys = TurboQuantMLX.quantize(keys, config: quantization)
+                blockPool[first].quantizedValues = TurboQuantMLX.quantize(values, config: quantization)
                 blockPool[first].keys = nil
                 blockPool[first].values = nil
             } else {
