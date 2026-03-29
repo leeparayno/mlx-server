@@ -1,0 +1,49 @@
+version: '3.8'
+
+services:
+  mlx-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.macOS  # Use Dockerfile for non-macOS
+    ports:
+      - "8080:8080"
+    volumes:
+      # Mount model cache for persistence
+      - mlx-cache:/root/.cache/mlx-server
+      # Optional: Mount models directory for faster startup
+      # - ./models:/models:ro
+    environment:
+      - MLX_LOG_LEVEL=info
+      - MLX_PORT=8080
+      - MLX_MODEL=mlx-community/Qwen2.5-0.5B-Instruct-4bit
+    restart: unless-stopped
+    deploy:
+      resources:
+        # Reserve significant memory for model and inference
+        reservations:
+          memory: 16G
+        limits:
+          memory: 64G
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 60s
+
+  # Optional: Nginx reverse proxy for load balancing
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro  # Mount SSL certificates
+    depends_on:
+      - mlx-server
+    restart: unless-stopped
+
+volumes:
+  mlx-cache:
+    driver: local

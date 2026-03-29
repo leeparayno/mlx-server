@@ -1,0 +1,1 @@
+{"batcher":{"total_slots":32,"utilization":0,"step_count":485,"active_slots":0},"gpu":{"sample_count":60,"average_utilization":0.09895833333333333,"current_utilization":0},"requests":{"cancelled":0,"completed":10,"failed":0,"active":0,"pending":0}}

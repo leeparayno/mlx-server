@@ -1,0 +1,89 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mlx-server
+  labels:
+    app: mlx-server
+    version: v1
+spec:
+  replicas: 1  # Increase for high availability
+  selector:
+    matchLabels:
+      app: mlx-server
+  template:
+    metadata:
+      labels:
+        app: mlx-server
+        version: v1
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      containers:
+      - name: mlx-server
+        image: mlx-server:latest  # Replace with your registry
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: http
+          containerPort: 8080
+          protocol: TCP
+        env:
+        - name: MLX_PORT
+          value: "8080"
+        - name: MLX_LOG_LEVEL
+          value: "info"
+        - name: MLX_MODEL
+          value: "mlx-community/Qwen2.5-0.5B-Instruct-4bit"
+        resources:
+          requests:
+            memory: "16Gi"
+            cpu: "4"
+          limits:
+            memory: "64Gi"
+            cpu: "16"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 60
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+        volumeMounts:
+        - name: model-cache
+          mountPath: /root/.cache/mlx-server
+      volumes:
+      - name: model-cache
+        persistentVolumeClaim:
+          claimName: mlx-server-cache
+      # Node affinity for Apple Silicon nodes (if applicable)
+      # affinity:
+      #   nodeAffinity:
+      #     requiredDuringSchedulingIgnoredDuringExecution:
+      #       nodeSelectorTerms:
+      #       - matchExpressions:
+      #         - key: kubernetes.io/arch
+      #           operator: In
+      #           values:
+      #           - arm64
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mlx-server-cache
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 50Gi  # For model cache
+  # storageClassName: fast-ssd  # Specify storage class if needed

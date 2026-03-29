@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mlx-server-config
+data:
+  # Server configuration
+  MLX_LOG_LEVEL: "info"
+  MLX_PORT: "8080"
+
+  # Model configuration
+  MLX_MODEL: "mlx-community/Qwen2.5-0.5B-Instruct-4bit"
+
+  # Performance tuning (optional, can be set via deployment)
+  # MAX_BATCH_SIZE: "32"
+  # MAX_CONCURRENT_REQUESTS: "100"

@@ -1,0 +1,31 @@
+# macOS-specific Dockerfile for MLX Server
+# This must be built on macOS with Apple Silicon for Metal support
+# Use this for local development or macOS-based production deployments
+
+FROM swift:6.2.3
+
+WORKDIR /app
+
+# Copy project files
+COPY . .
+
+# Build with xcodebuild (required for Metal shader compilation)
+RUN xcodebuild build \
+    -workspace .swiftpm/xcode/package.xcworkspace \
+    -scheme mlx-server \
+    -configuration Release \
+    -destination 'platform=OS X' \
+    CONFIGURATION_BUILD_DIR=/app/build
+
+# Create cache directory for models
+RUN mkdir -p /root/.cache/mlx-server/models
+
+# Expose port
+EXPOSE 8080
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:8080/health || exit 1
+
+# Default command
+CMD ["/app/build/mlx-server", "--port", "8080", "--model", "mlx-community/Qwen2.5-0.5B-Instruct-4bit"]
