@@ -2,6 +2,7 @@ import Foundation
 import MLX
 import MLXLMCommon
 import Logging
+import Memory
 
 /// Actor-based inference engine that coordinates with the scheduler
 /// Currently a simple wrapper around mlx-swift-lm - will be enhanced for Option 2
@@ -11,6 +12,7 @@ public actor InferenceEngine {
 
     private var modelContainer: ModelContainer?
     private let logger = Logger(label: "inference-engine")
+    private var kvCache: PagedKVCache?
 
     /// Per-slot generated token sequences for Phase 4.2
     /// Key: slot identifier (prompt)
@@ -28,6 +30,14 @@ public actor InferenceEngine {
         let configuration = await modelContainer.configuration
         logger.info("Inference engine initialized", metadata: [
             "model": "\(configuration.id)"
+        ])
+    }
+
+    /// Attach a KV cache actor for future cache-aware inference
+    public func attachKVCache(_ cache: PagedKVCache) async {
+        self.kvCache = cache
+        logger.info("KV cache attached", metadata: [
+            "type": "PagedKVCache"
         ])
     }
 
@@ -249,6 +259,11 @@ public actor InferenceEngine {
             // Use prompt as slot key for cache lookup
             // In Phase 4.3, we'll use proper slot IDs from ContinuousBatcher
             let slotKey = prompts[i]
+
+            // Touch KV cache blocks (scaffolding for quantized KV cache)
+            if let cache = kvCache, i < kvCacheBlockIds.count {
+                _ = try? await cache.getBlocks(ids: kvCacheBlockIds[i])
+            }
 
             // Generate next token with KV cache
             let sampledToken = try await generateNextToken(
