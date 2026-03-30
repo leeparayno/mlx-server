@@ -66,6 +66,7 @@ public actor ContinuousBatcher {
 
         // Attach KV cache to inference engine (scaffolding for Phase 4.3)
         await engine.attachKVCache(kvCache)
+        await engine.setKVQuantization(config.kvQuantization)
 
         isRunning = true
         logger.info("Starting continuous batcher", metadata: [

@@ -13,6 +13,7 @@ public actor InferenceEngine {
     private var modelContainer: ModelContainer?
     private let logger = Logger(label: "inference-engine")
     private var kvCache: PagedKVCache?
+    private var kvQuantization: QuantizationConfig = QuantizationConfig()
 
     /// Per-slot generated token sequences for Phase 4.2 (legacy fallback)
     private var slotTokenSequences: [String: [Int]] = [:]
@@ -36,6 +37,16 @@ public actor InferenceEngine {
         self.kvCache = cache
         logger.info("KV cache attached", metadata: [
             "type": "PagedKVCache"
+        ])
+    }
+
+    public func setKVQuantization(_ config: QuantizationConfig) async {
+        self.kvQuantization = config
+        logger.info("KV quantization config set", metadata: [
+            "enabled": "\(config.enabled)",
+            "bits": "\(config.bitWidth)",
+            "group_size": "\(config.groupSize)",
+            "start": "\(config.quantizedKVStart)"
         ])
     }
 
@@ -331,6 +342,9 @@ public actor InferenceEngine {
 
         let parameters = GenerateParameters(
             maxTokens: nil,
+            kvBits: kvQuantization.enabled ? kvQuantization.bitWidth : nil,
+            kvGroupSize: kvQuantization.groupSize,
+            quantizedKVStart: kvQuantization.quantizedKVStart,
             temperature: temperature,
             topP: topP
         )

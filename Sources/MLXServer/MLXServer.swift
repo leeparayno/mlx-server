@@ -21,6 +21,8 @@ struct ServerConfig {
     var kvQuantRotation: Bool = true
     var kvQuantRotationSeed: UInt64 = 1337
     var kvQuantQJLSeed: UInt64 = 4242
+    var kvQuantGroupSize: Int = 64
+    var kvQuantStart: Int = 0
 
     init(arguments: [String]) {
         // Try environment variables first (for compatibility with benchmarking scripts)
@@ -56,6 +58,12 @@ struct ServerConfig {
         }
         if let seed = ProcessInfo.processInfo.environment["MLX_KV_QJL_SEED"], let s = UInt64(seed) {
             kvQuantQJLSeed = s
+        }
+        if let g = ProcessInfo.processInfo.environment["MLX_KV_GROUP_SIZE"], let gs = Int(g) {
+            kvQuantGroupSize = gs
+        }
+        if let s = ProcessInfo.processInfo.environment["MLX_KV_QUANT_START"], let qs = Int(s) {
+            kvQuantStart = qs
         }
 
         // Then parse command-line arguments (overrides environment variables)
@@ -152,7 +160,9 @@ struct MLXServer {
             "kv_quant": "\(config.kvQuantEnabled)",
             "kv_quant_bits": "\(config.kvQuantBits)",
             "kv_quant_mode": "\(config.kvQuantMode)",
-            "kv_rotation": "\(config.kvQuantRotation)"
+            "kv_rotation": "\(config.kvQuantRotation)",
+            "kv_group_size": "\(config.kvQuantGroupSize)",
+            "kv_quant_start": "\(config.kvQuantStart)"
         ])
 
         // Load configuration from file if provided
@@ -198,7 +208,9 @@ struct MLXServer {
                 rotationEnabled: config.kvQuantRotation,
                 rotationSeed: config.kvQuantRotationSeed,
                 mode: quantMode,
-                qjlSeed: config.kvQuantQJLSeed
+                qjlSeed: config.kvQuantQJLSeed,
+                groupSize: config.kvQuantGroupSize,
+                quantizedKVStart: config.kvQuantStart
             )
             let batcher = ContinuousBatcher(
                 scheduler: scheduler,

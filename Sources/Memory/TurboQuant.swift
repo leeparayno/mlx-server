@@ -17,6 +17,8 @@ public struct QuantizationConfig: Sendable {
     public var rotationSeed: UInt64
     public var mode: QuantizationMode
     public var qjlSeed: UInt64
+    public var groupSize: Int
+    public var quantizedKVStart: Int
 
     public init(
         enabled: Bool = false,
@@ -24,7 +26,9 @@ public struct QuantizationConfig: Sendable {
         rotationEnabled: Bool = true,
         rotationSeed: UInt64 = 1337,
         mode: QuantizationMode = .mse,
-        qjlSeed: UInt64 = 4242
+        qjlSeed: UInt64 = 4242,
+        groupSize: Int = 64,
+        quantizedKVStart: Int = 0
     ) {
         self.enabled = enabled
         self.bitWidth = bitWidth
@@ -32,6 +36,8 @@ public struct QuantizationConfig: Sendable {
         self.rotationSeed = rotationSeed
         self.mode = mode
         self.qjlSeed = qjlSeed
+        self.groupSize = groupSize
+        self.quantizedKVStart = quantizedKVStart
     }
 }
 
