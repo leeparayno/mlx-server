@@ -14,13 +14,11 @@ public actor InferenceEngine {
     private let logger = Logger(label: "inference-engine")
     private var kvCache: PagedKVCache?
 
-    /// Per-slot generated token sequences for Phase 4.2
-    /// Key: slot identifier (prompt)
-    /// Value: Array of generated token IDs
-    /// Phase 4.2 approach: Store all generated tokens and regenerate from full sequence
-    /// This is inefficient but avoids KVCache Sendable issues
-    /// TODO Phase 4.3: Replace with proper PagedKVCache management
+    /// Per-slot generated token sequences for Phase 4.2 (legacy fallback)
     private var slotTokenSequences: [String: [Int]] = [:]
+
+    /// Per-slot TokenIterator for real KV cache integration (Phase 4.3)
+    private var slotIterators: [String: TokenIterator] = [:]
 
     public init() {}
 
@@ -39,6 +37,12 @@ public actor InferenceEngine {
         logger.info("KV cache attached", metadata: [
             "type": "PagedKVCache"
         ])
+    }
+
+    /// Reset per-slot state when a request finishes
+    public func resetSlot(slotKey: String) async {
+        slotTokenSequences.removeValue(forKey: slotKey)
+        slotIterators.removeValue(forKey: slotKey)
     }
 
     /// Convenience method to initialize with default model
@@ -303,80 +307,42 @@ public actor InferenceEngine {
         topP: Float,
         container: ModelContainer
     ) async throws -> Int {
-        // Get or initialize token sequence for this slot
-        var tokenSequence = slotTokenSequences[slotKey] ?? []
-
-        // For first token (sequence is empty), tokenize the prompt (slotKey is the prompt)
-        // For subsequent tokens, append the generated token
-        if tokenSequence.isEmpty {
-            // Tokenize prompt for first inference
-            let tokenizer = await container.tokenizer
-            let promptTokens = tokenizer.encode(text: slotKey)
-            tokenSequence = promptTokens
-        } else {
-            // Append generated token for continuation
-            tokenSequence.append(tokenId)
+        // Phase 4.3: Use TokenIterator with KV cache when available
+        if var iterator = slotIterators[slotKey] {
+            if let token = iterator.next() {
+                slotIterators[slotKey] = iterator
+                return token
+            } else {
+                // Generation complete; fallback to EOS
+                return 0
+            }
         }
 
-        // Update stored sequence
-        slotTokenSequences[slotKey] = tokenSequence
-
-        // Capture token sequence for use in closure
-        let sequenceToProcess = tokenSequence
-
-        // Validate sequence is not empty
-        guard !sequenceToProcess.isEmpty else {
-            logger.error("Empty token sequence - cannot generate next token", metadata: [
-                "slot_key": "\(slotKey.prefix(50))...",
-                "position": "\(position)"
-            ])
-            throw InferenceError.invalidParameters("Empty token sequence")
+        // Initialize TokenIterator for this slot
+        let tokenizer = await container.tokenizer
+        let promptTokens = tokenizer.encode(text: slotKey)
+        guard !promptTokens.isEmpty else {
+            throw InferenceError.invalidParameters("Empty prompt tokens")
         }
 
-        // Process full token sequence to get logits for next token
-        // This is inefficient but avoids KVCache Sendable issues
-        let logitsData: [Float] = try await container.perform { context in
-            let model = context.model
+        let tokens1D = MLXArray(promptTokens)
+        let tokenArray = tokens1D.reshaped([1, promptTokens.count])
+        let input = LMInput(tokens: tokenArray)
 
-            // Convert full token sequence to MLXArray with batch dimension
-            // MLX models expect shape [batch_size, sequence_length]
-            let tokens1D = MLXArray(sequenceToProcess)
-            let tokenArray = tokens1D.reshaped([1, sequenceToProcess.count])
+        let parameters = GenerateParameters(
+            maxTokens: nil,
+            temperature: temperature,
+            topP: topP
+        )
 
-            // Create LMInput.Text from token array
-            let input = LMInput.Text(tokens: tokenArray)
+        let model = await container.perform { context in
+            SendableBox(context.model)
+        }.consume()
 
-            // Call model forward pass WITHOUT cache for Phase 4.2
-            // Phase 4.2 approach: No persistent cache (regenerate from scratch each time)
-            // This is inefficient but avoids KVCache Sendable and shape mismatch issues
-            // TODO Phase 4.3: Add proper persistent cache management
-            let output = model(input, cache: nil, state: nil)
-
-            // Extract logits - shape is [batch_size=1, sequence_length, vocab_size]
-            let logits = output.logits
-
-            // Force evaluation of logits to ensure computation is complete
-            MLX.eval(logits)
-
-            // Get logits for the last token (next token prediction)
-            // logits[0] gets first batch element [sequence_length, vocab_size]
-            // logits[0][-1] gets the last position's logits [vocab_size]
-            let batchLogits = logits[0]
-            let lastLogits = batchLogits[batchLogits.dim(0) - 1]
-            let data = lastLogits.asArray(Float.self)
-
-            // Return sendable data
-            return data
-        }
-
-        // Sample next token using existing sampling logic (actor-isolated method)
-        let sampledToken = try sampleBatch(
-            logits: [logitsData],
-            temperatures: [temperature],
-            topP: [topP]
-        )[0]
-
-        return sampledToken
+        var iterator = try TokenIterator(input: input, model: model, parameters: parameters)
+        let token = iterator.next() ?? 0
+        slotIterators[slotKey] = iterator
+        return token
     }
 
     /// Sample next tokens for a batch of logits with temperature and top-p

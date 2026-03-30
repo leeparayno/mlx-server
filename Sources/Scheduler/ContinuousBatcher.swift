@@ -360,6 +360,7 @@ public actor ContinuousBatcher {
             if let slot = slots[i], slot.isFinished {
                 // Release KV cache blocks
                 await kvCache.release(for: slot.request.id)
+                await engine.resetSlot(slotKey: slot.request.request.prompt)
 
                 slots[i] = nil
                 logger.trace("Slot freed", metadata: [
@@ -380,6 +381,7 @@ public actor ContinuousBatcher {
                status == .cancelled {
                 // Release KV cache blocks
                 await kvCache.release(for: slot.request.id)
+                await engine.resetSlot(slotKey: slot.request.request.prompt)
 
                 // Free the slot immediately
                 slots[i] = nil
