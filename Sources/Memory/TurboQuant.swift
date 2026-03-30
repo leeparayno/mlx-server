@@ -5,17 +5,33 @@ import MLX
 /// NOTE: This is an initial, MSE-only implementation with scalar quantization.
 /// TODO: Add random rotation (structured orthogonal transform) and QJL residual stage.
 
+public enum QuantizationMode: String, Sendable {
+    case mse
+    case prod
+}
+
 public struct QuantizationConfig: Sendable {
     public var enabled: Bool
     public var bitWidth: Int
     public var rotationEnabled: Bool
     public var rotationSeed: UInt64
+    public var mode: QuantizationMode
+    public var qjlSeed: UInt64
 
-    public init(enabled: Bool = false, bitWidth: Int = 2, rotationEnabled: Bool = true, rotationSeed: UInt64 = 1337) {
+    public init(
+        enabled: Bool = false,
+        bitWidth: Int = 2,
+        rotationEnabled: Bool = true,
+        rotationSeed: UInt64 = 1337,
+        mode: QuantizationMode = .mse,
+        qjlSeed: UInt64 = 4242
+    ) {
         self.enabled = enabled
         self.bitWidth = bitWidth
         self.rotationEnabled = rotationEnabled
         self.rotationSeed = rotationSeed
+        self.mode = mode
+        self.qjlSeed = qjlSeed
     }
 }
 
@@ -34,6 +50,40 @@ public struct QuantizedVector: Sendable {
         self.dimension = dimension
         self.rotationEnabled = rotationEnabled
         self.rotationSeed = rotationSeed
+    }
+}
+
+public struct QuantizedVectorProd: Sendable {
+    public let indices: [UInt8]
+    public let norm: Float
+    public let bitWidth: Int
+    public let dimension: Int
+    public let rotationEnabled: Bool
+    public let rotationSeed: UInt64
+    public let qjlSigns: [UInt8]
+    public let residualNorm: Float
+    public let qjlSeed: UInt64
+
+    public init(
+        indices: [UInt8],
+        norm: Float,
+        bitWidth: Int,
+        dimension: Int,
+        rotationEnabled: Bool,
+        rotationSeed: UInt64,
+        qjlSigns: [UInt8],
+        residualNorm: Float,
+        qjlSeed: UInt64
+    ) {
+        self.indices = indices
+        self.norm = norm
+        self.bitWidth = bitWidth
+        self.dimension = dimension
+        self.rotationEnabled = rotationEnabled
+        self.rotationSeed = rotationSeed
+        self.qjlSigns = qjlSigns
+        self.residualNorm = residualNorm
+        self.qjlSeed = qjlSeed
     }
 }
 
@@ -118,6 +168,85 @@ public struct TurboQuantMSE {
         }
 
         return out.map { $0 * q.norm }
+    }
+}
+
+public struct TurboQuantProd {
+    public let bitWidth: Int
+    public let dimension: Int
+    public let mseQuant: TurboQuantMSE
+    public let qjlSeed: UInt64
+
+    public init(bitWidth: Int, dimension: Int, rotationEnabled: Bool, rotationSeed: UInt64, qjlSeed: UInt64) {
+        self.bitWidth = bitWidth
+        self.dimension = dimension
+        self.mseQuant = TurboQuantMSE(bitWidth: max(1, bitWidth - 1), dimension: dimension, rotationEnabled: rotationEnabled, rotationSeed: rotationSeed)
+        self.qjlSeed = qjlSeed
+    }
+
+    public func quantize(_ x: [Float]) -> QuantizedVectorProd {
+        let mse = mseQuant.quantize(x)
+        let xMSE = mseQuant.dequantize(mse)
+
+        var residual: [Float] = []
+        residual.reserveCapacity(x.count)
+        for i in 0..<x.count {
+            residual.append(x[i] - xMSE[i])
+        }
+
+        let residualNorm = sqrt(residual.reduce(0) { $0 + $1 * $1 })
+        let invResNorm: Float = residualNorm > 0 ? 1.0 / residualNorm : 1.0
+        var rNormed = residual.map { $0 * invResNorm }
+
+        // Structured QJL: use same rotation primitive, then sign
+        rNormed = TurboQuantRotation.apply(rNormed, seed: qjlSeed)
+        var qjlSigns: [UInt8] = []
+        qjlSigns.reserveCapacity(rNormed.count)
+        for v in rNormed {
+            qjlSigns.append(v >= 0 ? 1 : 0)
+        }
+
+        return QuantizedVectorProd(
+            indices: mse.indices,
+            norm: mse.norm,
+            bitWidth: bitWidth,
+            dimension: dimension,
+            rotationEnabled: mse.rotationEnabled,
+            rotationSeed: mse.rotationSeed,
+            qjlSigns: qjlSigns,
+            residualNorm: residualNorm,
+            qjlSeed: qjlSeed
+        )
+    }
+
+    public func dequantize(_ q: QuantizedVectorProd) -> [Float] {
+        let base = mseQuant.dequantize(
+            QuantizedVector(
+                indices: q.indices,
+                norm: q.norm,
+                bitWidth: max(1, q.bitWidth - 1),
+                dimension: q.dimension,
+                rotationEnabled: q.rotationEnabled,
+                rotationSeed: q.rotationSeed
+            )
+        )
+
+        // Reconstruct residual via structured QJL
+        var signs: [Float] = []
+        signs.reserveCapacity(q.qjlSigns.count)
+        for s in q.qjlSigns {
+            signs.append(s == 1 ? 1.0 : -1.0)
+        }
+        var r = TurboQuantRotation.applyInverse(signs, seed: q.qjlSeed)
+        let scale = (sqrt(Float.pi / 2.0) / Float(q.dimension)) * q.residualNorm
+        r = r.map { $0 * scale }
+
+        var out: [Float] = []
+        out.reserveCapacity(base.count)
+        for i in 0..<base.count {
+            out.append(base[i] + r[i])
+        }
+        return out
     }
 }
 
@@ -226,6 +355,18 @@ public enum TurboQuantMLX {
         return q.quantize(arr)
     }
 
+    public static func quantizeProd(_ x: MLXArray, config: QuantizationConfig) -> QuantizedVectorProd {
+        let arr = x.asArray(Float.self)
+        let q = TurboQuantProd(
+            bitWidth: config.bitWidth,
+            dimension: arr.count,
+            rotationEnabled: config.rotationEnabled,
+            rotationSeed: config.rotationSeed,
+            qjlSeed: config.qjlSeed
+        )
+        return q.quantize(arr)
+    }
+
     /// Dequantize to MLXArray (1D)
     public static func dequantize(_ q: QuantizedVector) -> MLXArray {
         let deq = TurboQuantMSE(
@@ -233,6 +374,17 @@ public enum TurboQuantMLX {
             dimension: q.dimension,
             rotationEnabled: q.rotationEnabled,
             rotationSeed: q.rotationSeed
+        ).dequantize(q)
+        return MLXArray(deq)
+    }
+
+    public static func dequantizeProd(_ q: QuantizedVectorProd) -> MLXArray {
+        let deq = TurboQuantProd(
+            bitWidth: q.bitWidth,
+            dimension: q.dimension,
+            rotationEnabled: q.rotationEnabled,
+            rotationSeed: q.rotationSeed,
+            qjlSeed: q.qjlSeed
         ).dequantize(q)
         return MLXArray(deq)
     }

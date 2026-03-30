@@ -116,6 +116,11 @@ public actor PagedKVCache {
                 let values = TurboQuantMLX.dequantize(vq)
                 return (keys, values)
             }
+            if let kq = block.quantizedKeysProd, let vq = block.quantizedValuesProd {
+                let keys = TurboQuantMLX.dequantizeProd(kq)
+                let values = TurboQuantMLX.dequantizeProd(vq)
+                return (keys, values)
+            }
             return (block.keys, block.values)
         }
 
@@ -154,8 +159,18 @@ public actor PagedKVCache {
         // For now, store the latest K/V in the first block for scaffolding
         if let first = ids.first {
             if quantization.enabled {
-                blockPool[first].quantizedKeys = TurboQuantMLX.quantize(keys, config: quantization)
-                blockPool[first].quantizedValues = TurboQuantMLX.quantize(values, config: quantization)
+                switch quantization.mode {
+                case .mse:
+                    blockPool[first].quantizedKeys = TurboQuantMLX.quantize(keys, config: quantization)
+                    blockPool[first].quantizedValues = TurboQuantMLX.quantize(values, config: quantization)
+                    blockPool[first].quantizedKeysProd = nil
+                    blockPool[first].quantizedValuesProd = nil
+                case .prod:
+                    blockPool[first].quantizedKeysProd = TurboQuantMLX.quantizeProd(keys, config: quantization)
+                    blockPool[first].quantizedValuesProd = TurboQuantMLX.quantizeProd(values, config: quantization)
+                    blockPool[first].quantizedKeys = nil
+                    blockPool[first].quantizedValues = nil
+                }
                 blockPool[first].keys = nil
                 blockPool[first].values = nil
             } else {
@@ -163,6 +178,8 @@ public actor PagedKVCache {
                 blockPool[first].values = values
                 blockPool[first].quantizedKeys = nil
                 blockPool[first].quantizedValues = nil
+                blockPool[first].quantizedKeysProd = nil
+                blockPool[first].quantizedValuesProd = nil
             }
         }
 
@@ -185,12 +202,16 @@ struct CacheBlock {
     var values: MLXArray?
     var quantizedKeys: QuantizedVector?
     var quantizedValues: QuantizedVector?
+    var quantizedKeysProd: QuantizedVectorProd?
+    var quantizedValuesProd: QuantizedVectorProd?
 
     mutating func clear() {
         keys = nil
         values = nil
         quantizedKeys = nil
         quantizedValues = nil
+        quantizedKeysProd = nil
+        quantizedValuesProd = nil
     }
 }
 
