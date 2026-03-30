@@ -5,6 +5,7 @@ import Core
 import Scheduler
 import API
 import Authentication
+import Memory
 
 // Custom command-line parsing (before Vapor)
 struct ServerConfig {
@@ -14,6 +15,12 @@ struct ServerConfig {
     var logLevel: String = "info"
     var verbose: Bool = false
     var test: Bool = false
+    var kvQuantEnabled: Bool = false
+    var kvQuantBits: Int = 2
+    var kvQuantMode: String = "mse"
+    var kvQuantRotation: Bool = true
+    var kvQuantRotationSeed: UInt64 = 1337
+    var kvQuantQJLSeed: UInt64 = 4242
 
     init(arguments: [String]) {
         // Try environment variables first (for compatibility with benchmarking scripts)
@@ -31,6 +38,24 @@ struct ServerConfig {
         }
         if ProcessInfo.processInfo.environment["MLX_TEST"] == "true" {
             test = true
+        }
+        if ProcessInfo.processInfo.environment["MLX_KV_QUANT"] == "true" {
+            kvQuantEnabled = true
+        }
+        if let bits = ProcessInfo.processInfo.environment["MLX_KV_QUANT_BITS"], let b = Int(bits) {
+            kvQuantBits = b
+        }
+        if let mode = ProcessInfo.processInfo.environment["MLX_KV_QUANT_MODE"] {
+            kvQuantMode = mode
+        }
+        if let rot = ProcessInfo.processInfo.environment["MLX_KV_ROTATION"], rot == "false" {
+            kvQuantRotation = false
+        }
+        if let seed = ProcessInfo.processInfo.environment["MLX_KV_ROTATION_SEED"], let s = UInt64(seed) {
+            kvQuantRotationSeed = s
+        }
+        if let seed = ProcessInfo.processInfo.environment["MLX_KV_QJL_SEED"], let s = UInt64(seed) {
+            kvQuantQJLSeed = s
         }
 
         // Then parse command-line arguments (overrides environment variables)
@@ -123,7 +148,11 @@ struct MLXServer {
         logger.info("Configuration:", metadata: [
             "port": "\(config.port)",
             "model": "\(config.model)",
-            "log_level": "\(level)"
+            "log_level": "\(level)",
+            "kv_quant": "\(config.kvQuantEnabled)",
+            "kv_quant_bits": "\(config.kvQuantBits)",
+            "kv_quant_mode": "\(config.kvQuantMode)",
+            "kv_rotation": "\(config.kvQuantRotation)"
         ])
 
         // Load configuration from file if provided
@@ -162,10 +191,19 @@ struct MLXServer {
             let scheduler = RequestScheduler()
 
             logger.info("🔄 Initializing continuous batcher...")
+            let quantMode: QuantizationMode = (config.kvQuantMode.lowercased() == "prod") ? .prod : .mse
+            let kvQuant = QuantizationConfig(
+                enabled: config.kvQuantEnabled,
+                bitWidth: config.kvQuantBits,
+                rotationEnabled: config.kvQuantRotation,
+                rotationSeed: config.kvQuantRotationSeed,
+                mode: quantMode,
+                qjlSeed: config.kvQuantQJLSeed
+            )
             let batcher = ContinuousBatcher(
                 scheduler: scheduler,
                 engine: engine,
-                config: ContinuousBatcher.Config(maxBatchSize: 32, eosTokenId: 2)
+                config: ContinuousBatcher.Config(maxBatchSize: 32, eosTokenId: 2, kvQuantization: kvQuant)
             )
 
             // Start batching loop in background

@@ -27,10 +27,12 @@ public actor ContinuousBatcher {
     public struct Config: Sendable {
         public let maxBatchSize: Int
         public let eosTokenId: Int
+        public let kvQuantization: QuantizationConfig
 
-        public init(maxBatchSize: Int = 32, eosTokenId: Int = 2) {
+        public init(maxBatchSize: Int = 32, eosTokenId: Int = 2, kvQuantization: QuantizationConfig = QuantizationConfig()) {
             self.maxBatchSize = maxBatchSize
             self.eosTokenId = eosTokenId
+            self.kvQuantization = kvQuantization
         }
     }
 
@@ -50,7 +52,7 @@ public actor ContinuousBatcher {
         self.gpuMonitor = GPUMonitor(config: GPUMonitor.Config(
             maxBatchSize: config.maxBatchSize
         ))
-        self.kvCache = PagedKVCache(blockSize: 16, numBlocks: 1024)
+        self.kvCache = PagedKVCache(blockSize: 16, numBlocks: 1024, quantization: config.kvQuantization)
     }
 
     // MARK: - Main Loop
