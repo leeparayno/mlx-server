@@ -353,7 +353,17 @@ public actor InferenceEngine {
             SendableBox(context.model)
         }.consume()
 
-        var iterator = try TokenIterator(input: input, model: model, parameters: parameters)
+        let cache: [KVCache]?
+        if kvQuantization.enabled && kvQuantization.implementation == .turbo {
+            // Create TurboQuant KV cache per layer
+            let base = model.newCache(parameters: parameters)
+            let turbo = base.map { _ in TurboQuantKVCache(config: .init(quantization: kvQuantization)) as KVCache }
+            cache = turbo
+        } else {
+            cache = nil
+        }
+
+        var iterator = try TokenIterator(input: input, model: model, cache: cache, parameters: parameters)
         let token = iterator.next() ?? 0
         slotIterators[slotKey] = iterator
         return token

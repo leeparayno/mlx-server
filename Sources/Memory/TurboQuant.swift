@@ -10,12 +10,18 @@ public enum QuantizationMode: String, Sendable {
     case prod
 }
 
+public enum QuantizationImplementation: String, Sendable {
+    case mlx
+    case turbo
+}
+
 public struct QuantizationConfig: Sendable {
     public var enabled: Bool
     public var bitWidth: Int
     public var rotationEnabled: Bool
     public var rotationSeed: UInt64
     public var mode: QuantizationMode
+    public var implementation: QuantizationImplementation
     public var qjlSeed: UInt64
     public var groupSize: Int
     public var quantizedKVStart: Int
@@ -26,6 +32,7 @@ public struct QuantizationConfig: Sendable {
         rotationEnabled: Bool = true,
         rotationSeed: UInt64 = 1337,
         mode: QuantizationMode = .mse,
+        implementation: QuantizationImplementation = .mlx,
         qjlSeed: UInt64 = 4242,
         groupSize: Int = 64,
         quantizedKVStart: Int = 0
@@ -35,6 +42,7 @@ public struct QuantizationConfig: Sendable {
         self.rotationEnabled = rotationEnabled
         self.rotationSeed = rotationSeed
         self.mode = mode
+        self.implementation = implementation
         self.qjlSeed = qjlSeed
         self.groupSize = groupSize
         self.quantizedKVStart = quantizedKVStart

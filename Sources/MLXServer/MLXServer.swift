@@ -18,6 +18,7 @@ struct ServerConfig {
     var kvQuantEnabled: Bool = false
     var kvQuantBits: Int = 2
     var kvQuantMode: String = "mse"
+    var kvQuantImpl: String = "mlx"
     var kvQuantRotation: Bool = true
     var kvQuantRotationSeed: UInt64 = 1337
     var kvQuantQJLSeed: UInt64 = 4242
@@ -49,6 +50,9 @@ struct ServerConfig {
         }
         if let mode = ProcessInfo.processInfo.environment["MLX_KV_QUANT_MODE"] {
             kvQuantMode = mode
+        }
+        if let impl = ProcessInfo.processInfo.environment["MLX_KV_QUANT_IMPL"] {
+            kvQuantImpl = impl
         }
         if let rot = ProcessInfo.processInfo.environment["MLX_KV_ROTATION"], rot == "false" {
             kvQuantRotation = false
@@ -160,6 +164,7 @@ struct MLXServer {
             "kv_quant": "\(config.kvQuantEnabled)",
             "kv_quant_bits": "\(config.kvQuantBits)",
             "kv_quant_mode": "\(config.kvQuantMode)",
+            "kv_quant_impl": "\(config.kvQuantImpl)",
             "kv_rotation": "\(config.kvQuantRotation)",
             "kv_group_size": "\(config.kvQuantGroupSize)",
             "kv_quant_start": "\(config.kvQuantStart)"
@@ -202,12 +207,14 @@ struct MLXServer {
 
             logger.info("🔄 Initializing continuous batcher...")
             let quantMode: QuantizationMode = (config.kvQuantMode.lowercased() == "prod") ? .prod : .mse
+            let quantImpl: QuantizationImplementation = (config.kvQuantImpl.lowercased() == "turbo") ? .turbo : .mlx
             let kvQuant = QuantizationConfig(
                 enabled: config.kvQuantEnabled,
                 bitWidth: config.kvQuantBits,
                 rotationEnabled: config.kvQuantRotation,
                 rotationSeed: config.kvQuantRotationSeed,
                 mode: quantMode,
+                implementation: quantImpl,
                 qjlSeed: config.kvQuantQJLSeed,
                 groupSize: config.kvQuantGroupSize,
                 quantizedKVStart: config.kvQuantStart
