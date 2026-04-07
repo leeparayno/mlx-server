@@ -298,6 +298,60 @@ public enum TurboQuantRotation {
         return out
     }
 
+    /// Vectorized rotation for batches using MLX (last dimension must be power of two)
+    public static func applyBatch(_ x: MLXArray, seed: UInt64) -> MLXArray {
+        let d = x.dim(-1)
+        guard isPowerOfTwo(d) else { return x }
+
+        let perm = permutation(count: d, seed: seed)
+        let sign = signVector(count: d, seed: seed ^ 0xA5A5A5A5)
+        let permIdx = MLXArray(perm.map { Int32($0) })
+        let signArr = MLXArray(sign).reshaped([1, d])
+
+        // gather last dimension
+        var y = x[.ellipsis, permIdx]
+        y = y * signArr
+        y = hadamardBatch(y)
+        return y
+    }
+
+    public static func applyBatchInverse(_ x: MLXArray, seed: UInt64) -> MLXArray {
+        let d = x.dim(-1)
+        guard isPowerOfTwo(d) else { return x }
+
+        var y = hadamardBatch(x)
+        let perm = permutation(count: d, seed: seed)
+        let sign = signVector(count: d, seed: seed ^ 0xA5A5A5A5)
+        let permIdx = MLXArray(perm.map { Int32($0) })
+        let signArr = MLXArray(sign).reshaped([1, d])
+
+        // invert permutation
+        var inv = [Int](repeating: 0, count: d)
+        for i in 0..<d { inv[perm[i]] = i }
+        let invIdx = MLXArray(inv.map { Int32($0) })
+
+        y = y * signArr
+        y = y[.ellipsis, invIdx]
+        return y
+    }
+
+    private static func hadamardBatch(_ x: MLXArray) -> MLXArray {
+        let d = x.dim(-1)
+        var y = x
+        var h = 1
+        while h < d {
+            let n = d / (2 * h)
+            let reshaped = y.reshaped([-1, n, 2 * h])
+            let a = reshaped[.ellipsis, 0..<h]
+            let b = reshaped[.ellipsis, h..<(2 * h)]
+            let c = concatenated([a + b, a - b], axis: -1)
+            y = c.reshaped(y.shape)
+            h *= 2
+        }
+        let scale = 1.0 / sqrt(Float(d))
+        return y * scale
+    }
+
     private static func hadamardInPlace(_ x: inout [Float]) {
         let n = x.count
         var h = 1

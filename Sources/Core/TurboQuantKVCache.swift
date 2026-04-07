@@ -124,43 +124,163 @@ public final class TurboQuantKVCache: BaseKVCache {
                 }
             }
         } else {
-            for bb in 0..<b {
-                for hh in 0..<h {
-                    for tt in 0..<l {
-                        let base = ((bb * h + hh) * l + tt) * d
-                        let sliceK = Array(kArr[base..<(base + d)])
-                        let sliceV = Array(vArr[base..<(base + d)])
+            // Vectorized Hadamard + QJL for rotation-enabled or prod
+            if config.quantization.mode == .prod && config.quantization.rotationEnabled {
+                let n = b * h * l
+                let kMatrix = MLXArray(kArr).reshaped([n, d])
+                let vMatrix = MLXArray(vArr).reshaped([n, d])
 
-                        switch config.quantization.mode {
-                        case .mse:
+                // MSE quantization per vector (still scalar)
+                var mseDeqK = [Float](repeating: 0, count: newTotal)
+                var mseDeqV = [Float](repeating: 0, count: newTotal)
+                var qkList: [QuantizedVector] = []
+                var qvList: [QuantizedVector] = []
+                qkList.reserveCapacity(n)
+                qvList.reserveCapacity(n)
+
+                var idx = 0
+                for bb in 0..<b {
+                    for hh in 0..<h {
+                        for tt in 0..<l {
+                            let base = ((bb * h + hh) * l + tt) * d
+                            let sliceK = Array(kArr[base..<(base + d)])
+                            let sliceV = Array(vArr[base..<(base + d)])
+
                             let qk = mseQ.quantize(sliceK)
                             let qv = mseQ.quantize(sliceV)
-                            self.keys.append(.mse(qk))
-                            self.values.append(.mse(qv))
+                            qkList.append(qk)
+                            qvList.append(qv)
 
-                            // inline dequantize
-                            let kVec = mseQ.dequantize(qk)
-                            let vVec = mseQ.dequantize(qv)
+                            let dk = mseQ.dequantize(qk)
+                            let dv = mseQ.dequantize(qv)
                             for i in 0..<headDim {
-                                outKeysNew[writeIndex + i] = kVec[i]
-                                outValuesNew[writeIndex + i] = vVec[i]
+                                mseDeqK[base + i] = dk[i]
+                                mseDeqV[base + i] = dv[i]
                             }
-                        case .prod:
-                            let qk = prodQ.quantize(sliceK)
-                            let qv = prodQ.quantize(sliceV)
-                            self.keys.append(.prod(qk))
-                            self.values.append(.prod(qv))
-
-                            // prod dequant (still required for attention)
-                            let kVec = prodQ.dequantize(qk)
-                            let vVec = prodQ.dequantize(qv)
-                            for i in 0..<headDim {
-                                outKeysNew[writeIndex + i] = kVec[i]
-                                outValuesNew[writeIndex + i] = vVec[i]
-                            }
+                            idx += 1
                         }
+                    }
+                }
 
-                        writeIndex += headDim
+                // Residuals
+                let resK = (kMatrix - MLXArray(mseDeqK).reshaped([n, d]))
+                let resV = (vMatrix - MLXArray(mseDeqV).reshaped([n, d]))
+
+                // Norms
+                let resKNorm = sqrt(sum(resK * resK, axis: -1))
+                let resVNorm = sqrt(sum(resV * resV, axis: -1))
+
+                let resKNormed = resK / resKNorm.reshaped([n, 1])
+                let resVNormed = resV / resVNorm.reshaped([n, 1])
+
+                // QJL: Hadamard + sign
+                let qjlK = TurboQuantRotation.applyBatch(resKNormed, seed: config.quantization.qjlSeed)
+                let qjlV = TurboQuantRotation.applyBatch(resVNormed, seed: config.quantization.qjlSeed)
+                let signsK = qjlK .>= 0
+                let signsV = qjlV .>= 0
+
+                // Dequantize residual via inverse Hadamard
+                let signKFloat = (signsK * 2) - 1
+                let signVFloat = (signsV * 2) - 1
+                let resKRec = TurboQuantRotation.applyBatchInverse(signKFloat, seed: config.quantization.qjlSeed)
+                let resVRec = TurboQuantRotation.applyBatchInverse(signVFloat, seed: config.quantization.qjlSeed)
+
+                let scale = sqrt(Float.pi / 2.0) / Float(d)
+                let resKScaled = resKRec * resKNorm.reshaped([n, 1]) * scale
+                let resVScaled = resVRec * resVNorm.reshaped([n, 1]) * scale
+
+                let outK = MLXArray(mseDeqK).reshaped([n, d]) + resKScaled
+                let outV = MLXArray(mseDeqV).reshaped([n, d]) + resVScaled
+
+                let outKArr = outK.asArray(Float.self)
+                let outVArr = outV.asArray(Float.self)
+                let signsKArr = signsK.asArray(Bool.self)
+                let signsVArr = signsV.asArray(Bool.self)
+                let resKNormArr = resKNorm.asArray(Float.self)
+                let resVNormArr = resVNorm.asArray(Float.self)
+
+                // store prod entries
+                for i in 0..<n {
+                    let start = i * d
+                    let qk = qkList[i]
+                    let qv = qvList[i]
+
+                    let signBase = i * d
+                    let qjlSignsK = signsKArr[signBase..<(signBase + d)].map { $0 ? UInt8(1) : UInt8(0) }
+                    let qjlSignsV = signsVArr[signBase..<(signBase + d)].map { $0 ? UInt8(1) : UInt8(0) }
+
+                    let kProd = QuantizedVectorProd(
+                        indices: qk.indices,
+                        norm: qk.norm,
+                        bitWidth: config.quantization.bitWidth,
+                        dimension: d,
+                        rotationEnabled: true,
+                        rotationSeed: config.quantization.rotationSeed,
+                        qjlSigns: Array(qjlSignsK),
+                        residualNorm: resKNormArr[i],
+                        qjlSeed: config.quantization.qjlSeed
+                    )
+                    let vProd = QuantizedVectorProd(
+                        indices: qv.indices,
+                        norm: qv.norm,
+                        bitWidth: config.quantization.bitWidth,
+                        dimension: d,
+                        rotationEnabled: true,
+                        rotationSeed: config.quantization.rotationSeed,
+                        qjlSigns: Array(qjlSignsV),
+                        residualNorm: resVNormArr[i],
+                        qjlSeed: config.quantization.qjlSeed
+                    )
+
+                    self.keys.append(.prod(kProd))
+                    self.values.append(.prod(vProd))
+
+                    for j in 0..<d {
+                        outKeysNew[start + j] = outKArr[start + j]
+                        outValuesNew[start + j] = outVArr[start + j]
+                    }
+                }
+
+                writeIndex = newTotal
+            } else {
+                for bb in 0..<b {
+                    for hh in 0..<h {
+                        for tt in 0..<l {
+                            let base = ((bb * h + hh) * l + tt) * d
+                            let sliceK = Array(kArr[base..<(base + d)])
+                            let sliceV = Array(vArr[base..<(base + d)])
+
+                            switch config.quantization.mode {
+                            case .mse:
+                                let qk = mseQ.quantize(sliceK)
+                                let qv = mseQ.quantize(sliceV)
+                                self.keys.append(.mse(qk))
+                                self.values.append(.mse(qv))
+
+                                // inline dequantize
+                                let kVec = mseQ.dequantize(qk)
+                                let vVec = mseQ.dequantize(qv)
+                                for i in 0..<headDim {
+                                    outKeysNew[writeIndex + i] = kVec[i]
+                                    outValuesNew[writeIndex + i] = vVec[i]
+                                }
+                            case .prod:
+                                let qk = prodQ.quantize(sliceK)
+                                let qv = prodQ.quantize(sliceV)
+                                self.keys.append(.prod(qk))
+                                self.values.append(.prod(qv))
+
+                                // prod dequant (still required for attention)
+                                let kVec = prodQ.dequantize(qk)
+                                let vVec = prodQ.dequantize(qv)
+                                for i in 0..<headDim {
+                                    outKeysNew[writeIndex + i] = kVec[i]
+                                    outValuesNew[writeIndex + i] = vVec[i]
+                                }
+                            }
+
+                            writeIndex += headDim
+                        }
                     }
                 }
             }
