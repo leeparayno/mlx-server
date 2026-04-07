@@ -66,6 +66,12 @@ public final class TurboQuantKVCache: BaseKVCache {
         )
 
         // Quantize per (b, h, t) vector of length headDim
+        // Also dequantize immediately for MSE mode to avoid a second pass
+        let newTotal = b * h * l * d
+        var outKeysNew = [Float](repeating: 0, count: newTotal)
+        var outValuesNew = [Float](repeating: 0, count: newTotal)
+        var writeIndex = 0
+
         for bb in 0..<b {
             for hh in 0..<h {
                 for tt in 0..<l {
@@ -79,56 +85,35 @@ public final class TurboQuantKVCache: BaseKVCache {
                         let qv = mseQ.quantize(sliceV)
                         self.keys.append(.mse(qk))
                         self.values.append(.mse(qv))
+
+                        // inline dequantize
+                        let kVec = mseQ.dequantize(qk)
+                        let vVec = mseQ.dequantize(qv)
+                        for i in 0..<headDim {
+                            outKeysNew[writeIndex + i] = kVec[i]
+                            outValuesNew[writeIndex + i] = vVec[i]
+                        }
                     case .prod:
                         let qk = prodQ.quantize(sliceK)
                         let qv = prodQ.quantize(sliceV)
                         self.keys.append(.prod(qk))
                         self.values.append(.prod(qv))
+
+                        // prod dequant (still required for attention)
+                        let kVec = prodQ.dequantize(qk)
+                        let vVec = prodQ.dequantize(qv)
+                        for i in 0..<headDim {
+                            outKeysNew[writeIndex + i] = kVec[i]
+                            outValuesNew[writeIndex + i] = vVec[i]
+                        }
                     }
+
+                    writeIndex += headDim
                 }
             }
         }
 
         self.offset += l
-
-        // Dequantize only the newly added tokens and append
-        let newTotal = b * h * l * d
-        var outKeysNew = [Float](repeating: 0, count: newTotal)
-        var outValuesNew = [Float](repeating: 0, count: newTotal)
-
-        // entries are appended in order (bb,hh,tt)
-        var writeIndex = 0
-
-        for bb in 0..<B {
-            for hh in 0..<kvHeads {
-                for tt in (self.offset - l)..<self.offset {
-                    let idx = ((bb * kvHeads + hh) * self.offset + tt)
-
-                    let kVec: [Float]
-                    let vVec: [Float]
-
-                    switch keys[idx] {
-                    case .mse(let q):
-                        kVec = mseQ.dequantize(q)
-                    case .prod(let q):
-                        kVec = prodQ.dequantize(q)
-                    }
-
-                    switch values[idx] {
-                    case .mse(let q):
-                        vVec = mseQ.dequantize(q)
-                    case .prod(let q):
-                        vVec = prodQ.dequantize(q)
-                    }
-
-                    for i in 0..<headDim {
-                        outKeysNew[writeIndex + i] = kVec[i]
-                        outValuesNew[writeIndex + i] = vVec[i]
-                    }
-                    writeIndex += headDim
-                }
-            }
-        }
 
         let newK = MLXArray(outKeysNew).reshaped([B, kvHeads, l, headDim])
         let newV = MLXArray(outValuesNew).reshaped([B, kvHeads, l, headDim])
