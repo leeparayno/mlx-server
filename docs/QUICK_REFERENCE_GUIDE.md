@@ -140,6 +140,33 @@ let parameters = GenerateParameters(
 // fp16: ~2GB → 4-bit: ~512MB (75% reduction)
 ```
 
+### TurboQuant KV Cache (mlx-server)
+
+**Enable TurboQuant KV cache:**
+```bash
+export MLX_KV_QUANT=true
+export MLX_KV_QUANT_IMPL=turbo     # mlx | turbo
+export MLX_KV_QUANT_MODE=mse       # mse | prod
+export MLX_KV_QUANT_BITS=3
+export MLX_KV_GROUP_SIZE=64
+export MLX_KV_QUANT_START=0
+export MLX_KV_ROTATION=true
+export MLX_KV_ROTATION_SEED=1337
+export MLX_KV_QJL_SEED=4242
+```
+
+**Batch quantize path (fast):**
+```bash
+export MLX_KV_QUANT=true
+export MLX_KV_QUANT_IMPL=turbo
+export MLX_KV_QUANT_MODE=mse
+export MLX_KV_ROTATION=false  # required for batch path
+```
+
+Notes:
+- TurboQuant implementation is **correct but not yet fully optimized** (dequantizes per update).
+- Batch path is only available for **MSE + rotation disabled**.
+
 ---
 
 ## Device Assignment Best Practices
