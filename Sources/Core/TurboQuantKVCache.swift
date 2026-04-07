@@ -26,6 +26,7 @@ public final class TurboQuantKVCache: BaseKVCache {
     private var B: Int = 0
     private var kvHeads: Int = 0
     private var headDim: Int = 0
+    private let step: Int = 256
 
     private let config: Config
 
@@ -132,15 +133,32 @@ public final class TurboQuantKVCache: BaseKVCache {
         let newK = MLXArray(outKeysNew).reshaped([B, kvHeads, l, headDim])
         let newV = MLXArray(outValuesNew).reshaped([B, kvHeads, l, headDim])
 
-        if let currentK = dequantKeys, let currentV = dequantValues {
-            dequantKeys = concatenated([currentK, newK], axis: 2)
-            dequantValues = concatenated([currentV, newV], axis: 2)
-        } else {
-            dequantKeys = newK
-            dequantValues = newV
+        // Expand dequant buffers if needed (like KVCacheSimple)
+        let prev = self.offset - l
+        if dequantKeys == nil || (prev + l) > dequantKeys!.dim(2) {
+            let newSteps = ((step + l - 1) / step) * step
+            let shape = [B, kvHeads, newSteps, headDim]
+            let zerosK = MLXArray.zeros(shape, dtype: newK.dtype)
+            let zerosV = MLXArray.zeros(shape, dtype: newV.dtype)
+
+            if let currentK = dequantKeys, let currentV = dequantValues {
+                let trimmedK = currentK[.ellipsis, ..<prev, 0...]
+                let trimmedV = currentV[.ellipsis, ..<prev, 0...]
+                dequantKeys = concatenated([trimmedK, zerosK], axis: 2)
+                dequantValues = concatenated([trimmedV, zerosV], axis: 2)
+            } else {
+                dequantKeys = zerosK
+                dequantValues = zerosV
+            }
         }
 
-        return (dequantKeys!, dequantValues!)
+        dequantKeys?[.ellipsis, prev ..< self.offset, 0...] = newK
+        dequantValues?[.ellipsis, prev ..< self.offset, 0...] = newV
+
+        let outK = dequantKeys![.ellipsis, ..<self.offset, 0...]
+        let outV = dequantValues![.ellipsis, ..<self.offset, 0...]
+
+        return (outK, outV)
     }
 
     public override var state: [MLXArray] {
