@@ -21,6 +21,8 @@ public final class TurboQuantKVCache: BaseKVCache {
 
     private var keys: [Entry] = []
     private var values: [Entry] = []
+    private var dequantKeys: MLXArray?
+    private var dequantValues: MLXArray?
     private var B: Int = 0
     private var kvHeads: Int = 0
     private var headDim: Int = 0
@@ -47,6 +49,21 @@ public final class TurboQuantKVCache: BaseKVCache {
         let kArr = keys.asArray(Float.self)
         let vArr = values.asArray(Float.self)
 
+        // Prebuild quantizers for this head dimension
+        let mseQ = TurboQuantMSE(
+            bitWidth: config.quantization.bitWidth,
+            dimension: d,
+            rotationEnabled: config.quantization.rotationEnabled,
+            rotationSeed: config.quantization.rotationSeed
+        )
+        let prodQ = TurboQuantProd(
+            bitWidth: config.quantization.bitWidth,
+            dimension: d,
+            rotationEnabled: config.quantization.rotationEnabled,
+            rotationSeed: config.quantization.rotationSeed,
+            qjlSeed: config.quantization.qjlSeed
+        )
+
         // Quantize per (b, h, t) vector of length headDim
         for bb in 0..<b {
             for hh in 0..<h {
@@ -57,35 +74,13 @@ public final class TurboQuantKVCache: BaseKVCache {
 
                     switch config.quantization.mode {
                     case .mse:
-                        let qk = TurboQuantMSE(
-                            bitWidth: config.quantization.bitWidth,
-                            dimension: d,
-                            rotationEnabled: config.quantization.rotationEnabled,
-                            rotationSeed: config.quantization.rotationSeed
-                        ).quantize(sliceK)
-                        let qv = TurboQuantMSE(
-                            bitWidth: config.quantization.bitWidth,
-                            dimension: d,
-                            rotationEnabled: config.quantization.rotationEnabled,
-                            rotationSeed: config.quantization.rotationSeed
-                        ).quantize(sliceV)
+                        let qk = mseQ.quantize(sliceK)
+                        let qv = mseQ.quantize(sliceV)
                         self.keys.append(.mse(qk))
                         self.values.append(.mse(qv))
                     case .prod:
-                        let qk = TurboQuantProd(
-                            bitWidth: config.quantization.bitWidth,
-                            dimension: d,
-                            rotationEnabled: config.quantization.rotationEnabled,
-                            rotationSeed: config.quantization.rotationSeed,
-                            qjlSeed: config.quantization.qjlSeed
-                        ).quantize(sliceK)
-                        let qv = TurboQuantProd(
-                            bitWidth: config.quantization.bitWidth,
-                            dimension: d,
-                            rotationEnabled: config.quantization.rotationEnabled,
-                            rotationSeed: config.quantization.rotationSeed,
-                            qjlSeed: config.quantization.qjlSeed
-                        ).quantize(sliceV)
+                        let qk = prodQ.quantize(sliceK)
+                        let qv = prodQ.quantize(sliceV)
                         self.keys.append(.prod(qk))
                         self.values.append(.prod(qv))
                     }
@@ -95,69 +90,57 @@ public final class TurboQuantKVCache: BaseKVCache {
 
         self.offset += l
 
-        // Dequantize full cache to return
-        let totalTokens = self.offset
-        let total = B * kvHeads * totalTokens * headDim
-        var outKeys = [Float](repeating: 0, count: total)
-        var outValues = [Float](repeating: 0, count: total)
+        // Dequantize only the newly added tokens and append
+        let newTotal = b * h * l * d
+        var outKeysNew = [Float](repeating: 0, count: newTotal)
+        var outValuesNew = [Float](repeating: 0, count: newTotal)
+
+        // entries are appended in order (bb,hh,tt)
+        var writeIndex = 0
 
         for bb in 0..<B {
             for hh in 0..<kvHeads {
-                for tt in 0..<totalTokens {
-                    let idx = ((bb * kvHeads + hh) * totalTokens + tt)
-                    let base = idx * headDim
+                for tt in (self.offset - l)..<self.offset {
+                    let idx = ((bb * kvHeads + hh) * self.offset + tt)
 
                     let kVec: [Float]
                     let vVec: [Float]
 
                     switch keys[idx] {
                     case .mse(let q):
-                        kVec = TurboQuantMSE(
-                            bitWidth: q.bitWidth,
-                            dimension: q.dimension,
-                            rotationEnabled: q.rotationEnabled,
-                            rotationSeed: q.rotationSeed
-                        ).dequantize(q)
+                        kVec = mseQ.dequantize(q)
                     case .prod(let q):
-                        kVec = TurboQuantProd(
-                            bitWidth: q.bitWidth,
-                            dimension: q.dimension,
-                            rotationEnabled: q.rotationEnabled,
-                            rotationSeed: q.rotationSeed,
-                            qjlSeed: q.qjlSeed
-                        ).dequantize(q)
+                        kVec = prodQ.dequantize(q)
                     }
 
                     switch values[idx] {
                     case .mse(let q):
-                        vVec = TurboQuantMSE(
-                            bitWidth: q.bitWidth,
-                            dimension: q.dimension,
-                            rotationEnabled: q.rotationEnabled,
-                            rotationSeed: q.rotationSeed
-                        ).dequantize(q)
+                        vVec = mseQ.dequantize(q)
                     case .prod(let q):
-                        vVec = TurboQuantProd(
-                            bitWidth: q.bitWidth,
-                            dimension: q.dimension,
-                            rotationEnabled: q.rotationEnabled,
-                            rotationSeed: q.rotationSeed,
-                            qjlSeed: q.qjlSeed
-                        ).dequantize(q)
+                        vVec = prodQ.dequantize(q)
                     }
 
                     for i in 0..<headDim {
-                        outKeys[base + i] = kVec[i]
-                        outValues[base + i] = vVec[i]
+                        outKeysNew[writeIndex + i] = kVec[i]
+                        outValuesNew[writeIndex + i] = vVec[i]
                     }
+                    writeIndex += headDim
                 }
             }
         }
 
-        let outK = MLXArray(outKeys).reshaped([B, kvHeads, totalTokens, headDim])
-        let outV = MLXArray(outValues).reshaped([B, kvHeads, totalTokens, headDim])
+        let newK = MLXArray(outKeysNew).reshaped([B, kvHeads, l, headDim])
+        let newV = MLXArray(outValuesNew).reshaped([B, kvHeads, l, headDim])
 
-        return (outK, outV)
+        if let currentK = dequantKeys, let currentV = dequantValues {
+            dequantKeys = concatenated([currentK, newK], axis: 2)
+            dequantValues = concatenated([currentV, newV], axis: 2)
+        } else {
+            dequantKeys = newK
+            dequantValues = newV
+        }
+
+        return (dequantKeys!, dequantValues!)
     }
 
     public override var state: [MLXArray] {
@@ -183,6 +166,8 @@ public final class TurboQuantKVCache: BaseKVCache {
         new.headDim = self.headDim
         new.keys = self.keys
         new.values = self.values
+        new.dequantKeys = self.dequantKeys
+        new.dequantValues = self.dequantValues
         return new
     }
 }
