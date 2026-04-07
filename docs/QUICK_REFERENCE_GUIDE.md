@@ -166,6 +166,14 @@ export MLX_KV_ROTATION=false  # required for batch path
 Notes:
 - TurboQuant implementation is **correct but not yet fully optimized** (dequantizes per update).
 - Batch path is only available for **MSE + rotation disabled**.
+- For **rotation enabled** or **prod mode**, use the **vectorized Hadamard + QJL path** (recommended):
+```bash
+export MLX_KV_QUANT=true
+export MLX_KV_QUANT_IMPL=turbo
+export MLX_KV_QUANT_MODE=prod   # or mse
+export MLX_KV_ROTATION=true
+export MLX_KV_QJL_SEED=4242
+```
 
 ---
 
