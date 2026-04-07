@@ -72,43 +72,96 @@ public final class TurboQuantKVCache: BaseKVCache {
         var outValuesNew = [Float](repeating: 0, count: newTotal)
         var writeIndex = 0
 
-        for bb in 0..<b {
-            for hh in 0..<h {
-                for tt in 0..<l {
-                    let base = ((bb * h + hh) * l + tt) * d
-                    let sliceK = Array(kArr[base..<(base + d)])
-                    let sliceV = Array(vArr[base..<(base + d)])
+        // Fast batch MSE path (rotation disabled) using midpoints
+        if config.quantization.mode == .mse && !config.quantization.rotationEnabled {
+            let centroids = mseQ.centroids
+            var midpoints: [Float] = []
+            midpoints.reserveCapacity(centroids.count - 1)
+            for i in 0..<(centroids.count - 1) {
+                midpoints.append((centroids[i] + centroids[i + 1]) * 0.5)
+            }
 
-                    switch config.quantization.mode {
-                    case .mse:
-                        let qk = mseQ.quantize(sliceK)
-                        let qv = mseQ.quantize(sliceV)
-                        self.keys.append(.mse(qk))
-                        self.values.append(.mse(qv))
+            func quantizeVector(_ slice: ArraySlice<Float>) -> (indices: [UInt8], deq: [Float], norm: Float) {
+                var norm: Float = 0
+                for v in slice { norm += v * v }
+                norm = sqrt(norm)
+                let inv = norm > 0 ? 1.0 / norm : 1.0
 
-                        // inline dequantize
-                        let kVec = mseQ.dequantize(qk)
-                        let vVec = mseQ.dequantize(qv)
+                var indices: [UInt8] = []
+                indices.reserveCapacity(slice.count)
+                var deq: [Float] = []
+                deq.reserveCapacity(slice.count)
+
+                for v in slice {
+                    let x = v * inv
+                    var idx = 0
+                    while idx < midpoints.count && x > midpoints[idx] { idx += 1 }
+                    indices.append(UInt8(idx))
+                    deq.append(centroids[idx] * norm)
+                }
+                return (indices, deq, norm)
+            }
+
+            for bb in 0..<b {
+                for hh in 0..<h {
+                    for tt in 0..<l {
+                        let base = ((bb * h + hh) * l + tt) * d
+                        let sliceK = kArr[base..<(base + d)]
+                        let sliceV = vArr[base..<(base + d)]
+
+                        let qk = quantizeVector(sliceK)
+                        let qv = quantizeVector(sliceV)
+
+                        self.keys.append(.mse(QuantizedVector(indices: qk.indices, norm: qk.norm, bitWidth: config.quantization.bitWidth, dimension: d, rotationEnabled: false, rotationSeed: config.quantization.rotationSeed)))
+                        self.values.append(.mse(QuantizedVector(indices: qv.indices, norm: qv.norm, bitWidth: config.quantization.bitWidth, dimension: d, rotationEnabled: false, rotationSeed: config.quantization.rotationSeed)))
+
                         for i in 0..<headDim {
-                            outKeysNew[writeIndex + i] = kVec[i]
-                            outValuesNew[writeIndex + i] = vVec[i]
+                            outKeysNew[writeIndex + i] = qk.deq[i]
+                            outValuesNew[writeIndex + i] = qv.deq[i]
                         }
-                    case .prod:
-                        let qk = prodQ.quantize(sliceK)
-                        let qv = prodQ.quantize(sliceV)
-                        self.keys.append(.prod(qk))
-                        self.values.append(.prod(qv))
-
-                        // prod dequant (still required for attention)
-                        let kVec = prodQ.dequantize(qk)
-                        let vVec = prodQ.dequantize(qv)
-                        for i in 0..<headDim {
-                            outKeysNew[writeIndex + i] = kVec[i]
-                            outValuesNew[writeIndex + i] = vVec[i]
-                        }
+                        writeIndex += headDim
                     }
+                }
+            }
+        } else {
+            for bb in 0..<b {
+                for hh in 0..<h {
+                    for tt in 0..<l {
+                        let base = ((bb * h + hh) * l + tt) * d
+                        let sliceK = Array(kArr[base..<(base + d)])
+                        let sliceV = Array(vArr[base..<(base + d)])
 
-                    writeIndex += headDim
+                        switch config.quantization.mode {
+                        case .mse:
+                            let qk = mseQ.quantize(sliceK)
+                            let qv = mseQ.quantize(sliceV)
+                            self.keys.append(.mse(qk))
+                            self.values.append(.mse(qv))
+
+                            // inline dequantize
+                            let kVec = mseQ.dequantize(qk)
+                            let vVec = mseQ.dequantize(qv)
+                            for i in 0..<headDim {
+                                outKeysNew[writeIndex + i] = kVec[i]
+                                outValuesNew[writeIndex + i] = vVec[i]
+                            }
+                        case .prod:
+                            let qk = prodQ.quantize(sliceK)
+                            let qv = prodQ.quantize(sliceV)
+                            self.keys.append(.prod(qk))
+                            self.values.append(.prod(qv))
+
+                            // prod dequant (still required for attention)
+                            let kVec = prodQ.dequantize(qk)
+                            let vVec = prodQ.dequantize(qv)
+                            for i in 0..<headDim {
+                                outKeysNew[writeIndex + i] = kVec[i]
+                                outValuesNew[writeIndex + i] = vVec[i]
+                            }
+                        }
+
+                        writeIndex += headDim
+                    }
                 }
             }
         }
