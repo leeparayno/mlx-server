@@ -94,8 +94,7 @@ public final class TurboQuantKVCache: BaseKVCache {
 
                 for v in slice {
                     let x = v * inv
-                    var idx = 0
-                    while idx < midpoints.count && x > midpoints[idx] { idx += 1 }
+                        while idx < midpoints.count && x > midpoints[idx] { idx += 1 }
                     indices.append(UInt8(idx))
                     deq.append(centroids[idx] * norm)
                 }
@@ -124,8 +123,98 @@ public final class TurboQuantKVCache: BaseKVCache {
                 }
             }
         } else {
-            // Vectorized Hadamard + QJL for rotation-enabled or prod
-            if config.quantization.mode == .prod && config.quantization.rotationEnabled {
+            // Vectorized Hadamard paths
+            if config.quantization.mode == .mse && config.quantization.rotationEnabled {
+                let n = b * h * l
+                let kMatrix = MLXArray(kArr).reshaped([n, d])
+                let vMatrix = MLXArray(vArr).reshaped([n, d])
+
+                // Norms and normalization
+                let kNorm = sqrt(sum(kMatrix * kMatrix, axis: -1))
+                let vNorm = sqrt(sum(vMatrix * vMatrix, axis: -1))
+                let kNormed = kMatrix / kNorm.reshaped([n, 1])
+                let vNormed = vMatrix / vNorm.reshaped([n, 1])
+
+                // Rotate
+                let kRot = TurboQuantRotation.applyBatch(kNormed, seed: config.quantization.rotationSeed)
+                let vRot = TurboQuantRotation.applyBatch(vNormed, seed: config.quantization.rotationSeed)
+
+                // Quantize rotated using midpoints
+                let centroids = mseQ.centroids
+                var midpoints: [Float] = []
+                midpoints.reserveCapacity(centroids.count - 1)
+                for i in 0..<(centroids.count - 1) {
+                    midpoints.append((centroids[i] + centroids[i + 1]) * 0.5)
+                }
+
+                let kRotArr = kRot.asArray(Float.self)
+                let vRotArr = vRot.asArray(Float.self)
+                let kNormArr = kNorm.asArray(Float.self)
+                let vNormArr = vNorm.asArray(Float.self)
+
+                // Build indices and dequantized rotated
+                var deqKRot = [Float](repeating: 0, count: newTotal)
+                var deqVRot = [Float](repeating: 0, count: newTotal)
+
+                for i in 0..<n {
+                    let start = i * d
+                    var idxsK = [UInt8]()
+                    var idxsV = [UInt8]()
+                    idxsK.reserveCapacity(d)
+                    idxsV.reserveCapacity(d)
+
+                    for j in 0..<d {
+                        let xk = kRotArr[start + j]
+                        let xv = vRotArr[start + j]
+
+                        var ik = 0
+                        while ik < midpoints.count && xk > midpoints[ik] { ik += 1 }
+                        var iv = 0
+                        while iv < midpoints.count && xv > midpoints[iv] { iv += 1 }
+
+                        idxsK.append(UInt8(ik))
+                        idxsV.append(UInt8(iv))
+
+                        deqKRot[start + j] = centroids[ik]
+                        deqVRot[start + j] = centroids[iv]
+                    }
+
+                    let qk = QuantizedVector(
+                        indices: idxsK,
+                        norm: kNormArr[i],
+                        bitWidth: config.quantization.bitWidth,
+                        dimension: d,
+                        rotationEnabled: true,
+                        rotationSeed: config.quantization.rotationSeed
+                    )
+                    let qv = QuantizedVector(
+                        indices: idxsV,
+                        norm: vNormArr[i],
+                        bitWidth: config.quantization.bitWidth,
+                        dimension: d,
+                        rotationEnabled: true,
+                        rotationSeed: config.quantization.rotationSeed
+                    )
+                    self.keys.append(.mse(qk))
+                    self.values.append(.mse(qv))
+                }
+
+                // Dequantize: inverse rotate and rescale by norms
+                let kDeq = TurboQuantRotation.applyBatchInverse(MLXArray(deqKRot).reshaped([n, d]), seed: config.quantization.rotationSeed)
+                let vDeq = TurboQuantRotation.applyBatchInverse(MLXArray(deqVRot).reshaped([n, d]), seed: config.quantization.rotationSeed)
+
+                let outK = kDeq * kNorm.reshaped([n, 1])
+                let outV = vDeq * vNorm.reshaped([n, 1])
+
+                let outKArr = outK.asArray(Float.self)
+                let outVArr = outV.asArray(Float.self)
+                for i in 0..<newTotal {
+                    outKeysNew[i] = outKArr[i]
+                    outValuesNew[i] = outVArr[i]
+                }
+
+                writeIndex = newTotal
+            } else if config.quantization.mode == .prod && config.quantization.rotationEnabled {
                 let n = b * h * l
                 let kMatrix = MLXArray(kArr).reshaped([n, d])
                 let vMatrix = MLXArray(vArr).reshaped([n, d])
@@ -138,7 +227,6 @@ public final class TurboQuantKVCache: BaseKVCache {
                 qkList.reserveCapacity(n)
                 qvList.reserveCapacity(n)
 
-                var idx = 0
                 for bb in 0..<b {
                     for hh in 0..<h {
                         for tt in 0..<l {
@@ -157,7 +245,6 @@ public final class TurboQuantKVCache: BaseKVCache {
                                 mseDeqK[base + i] = dk[i]
                                 mseDeqV[base + i] = dv[i]
                             }
-                            idx += 1
                         }
                     }
                 }
