@@ -2,6 +2,7 @@ import Foundation
 import MLX
 import MLXLMCommon
 import Memory
+import simd
 
 /// TurboQuant-backed KV cache (scaffolding)
 /// NOTE: This stores quantized per-token vectors and dequantizes on read.
@@ -72,6 +73,25 @@ public final class TurboQuantKVCache: BaseKVCache {
         var outValuesNew = [Float](repeating: 0, count: newTotal)
         var writeIndex = 0
 
+        @inline(__always)
+        func centroidIndex(_ x: Float, midpoints: [Float]) -> Int {
+            var idx = 0
+            var i = 0
+            let count = midpoints.count
+            let xVec = SIMD4<Float>(repeating: x)
+            while i + 4 <= count {
+                let mp = SIMD4<Float>(midpoints[i], midpoints[i + 1], midpoints[i + 2], midpoints[i + 3])
+                let mask = xVec .> mp
+                idx += (mask[0] ? 1 : 0) + (mask[1] ? 1 : 0) + (mask[2] ? 1 : 0) + (mask[3] ? 1 : 0)
+                i += 4
+            }
+            while i < count {
+                if x > midpoints[i] { idx += 1 }
+                i += 1
+            }
+            return idx
+        }
+
         // Fast batch MSE path (rotation disabled) using midpoints
         if config.quantization.mode == .mse && !config.quantization.rotationEnabled {
             let centroids = mseQ.centroids
@@ -94,7 +114,7 @@ public final class TurboQuantKVCache: BaseKVCache {
 
                 for v in slice {
                     let x = v * inv
-                        while idx < midpoints.count && x > midpoints[idx] { idx += 1 }
+                    let idx = centroidIndex(x, midpoints: midpoints)
                     indices.append(UInt8(idx))
                     deq.append(centroids[idx] * norm)
                 }
@@ -167,10 +187,8 @@ public final class TurboQuantKVCache: BaseKVCache {
                         let xk = kRotArr[start + j]
                         let xv = vRotArr[start + j]
 
-                        var ik = 0
-                        while ik < midpoints.count && xk > midpoints[ik] { ik += 1 }
-                        var iv = 0
-                        while iv < midpoints.count && xv > midpoints[iv] { iv += 1 }
+                        let ik = centroidIndex(xk, midpoints: midpoints)
+                        let iv = centroidIndex(xv, midpoints: midpoints)
 
                         idxsK.append(UInt8(ik))
                         idxsV.append(UInt8(iv))
