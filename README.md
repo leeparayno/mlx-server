@@ -15,9 +15,17 @@ MLX Server is designed to maximize the performance of Mac Studio M3 Ultra hardwa
 
 ## Project Status
 
-🚧 **Early Development** - Currently implementing Phase 1 (Foundation)
+✅ **Phase 6.1 Complete** - Production API + Auth/Ratelimits implemented and verified
 
-See [docs/plans/2026-02-15-feat-single-node-swift-mlx-server-plan.md](docs/plans/2026-02-15-feat-single-node-swift-mlx-server-plan.md) for the complete implementation roadmap.
+**Completed Phases:**
+- Phase 1: Foundation
+- Phase 2: Actor-Based Request Handling
+- Phase 3: Continuous Batching
+- Phase 4: PagedAttention + MLX Integration (Phase 4.4 verification complete)
+- Phase 5: Production HTTP/SSE API
+- Phase 6.1: Authentication & Authorization
+
+See [docs/Development-Progress.md](docs/Development-Progress.md) for detailed progress and [docs/plans/2026-02-15-feat-single-node-swift-mlx-server-plan.md](docs/plans/2026-02-15-feat-single-node-swift-mlx-server-plan.md) for the full roadmap.
 
 ## Requirements
 
@@ -106,38 +114,46 @@ mlx-server/
 
 ## Architecture
 
-### Phase 1: Foundation (Weeks 1-2) ✅ In Progress
+### Phase 1: Foundation ✅ Complete
 
 - [x] Project structure initialized
 - [x] Package.swift configured with dependencies
 - [x] Basic CLI with argument parsing
-- [ ] Model loading from Hugging Face Hub
-- [ ] Basic single-token inference
+- [x] Model loading from Hugging Face Hub
+- [x] Basic single-token inference
 
-### Phase 2: Actor-Based Handling (Weeks 3-4)
+### Phase 2: Actor-Based Handling ✅ Complete
 
-- [ ] InferenceEngine actor
-- [ ] RequestScheduler actor
-- [ ] Concurrent request processing
-- [ ] Request prioritization
+- [x] InferenceEngine actor
+- [x] RequestScheduler actor
+- [x] Concurrent request processing
+- [x] Request prioritization
 
-### Phase 3: Continuous Batching (Weeks 5-6)
+### Phase 3: Continuous Batching ✅ Complete
 
-- [ ] Dynamic batch formation
-- [ ] Slot management
-- [ ] GPU utilization optimization
+- [x] Dynamic batch formation
+- [x] Slot management
+- [x] GPU utilization optimization
 
-### Phase 4: PagedAttention (Weeks 7-8)
+### Phase 4: PagedAttention + MLX Integration ✅ Complete
 
-- [ ] Block-based KV cache
-- [ ] Memory allocation/deallocation
-- [ ] Cache eviction policies
+- [x] Block-based KV cache
+- [x] Memory allocation/deallocation
+- [x] Cache eviction policies
+- [x] Batch forward pass with MLX
+- [x] Phase 4.4 verification (144/144 tests)
 
-### Phase 5: API Layer (Week 9)
+### Phase 5: API Layer ✅ Complete
 
-- [ ] OpenAI-compatible endpoints
-- [ ] SSE streaming
-- [ ] WebSocket support
+- [x] OpenAI-compatible endpoints
+- [x] SSE streaming
+- [x] Observability (/health, /metrics)
+
+### Phase 6.1: Auth & Rate Limiting ✅ Complete
+
+- [x] API key authentication middleware
+- [x] Per-user quotas + rate limiting
+- [x] Security test suite
 
 ## Development
 
@@ -253,6 +269,6 @@ MIT License - see [LICENSE](LICENSE) for details.
 
 ---
 
-**Status:** Phase 1 (Foundation) - In Progress
+**Status:** Phase 6.1 (Authentication & Authorization) - Complete
 
-**Next Milestone:** Model loading and basic inference (Week 2)
+**Next Milestone:** Phase 6.2+ Advanced optimizations (speculative decoding, KV quantization, prefix caching)
